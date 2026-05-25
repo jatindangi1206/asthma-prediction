@@ -1,0 +1,5 @@
+{
+    "hazard_lambda": 30.0,
+    "transition_th": 0.12,
+    "shift_th": 0.25
+}
