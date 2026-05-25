@@ -1,0 +1,11 @@
+__pycache__/
+.venv/
+*.pyc
+.DS_Store
+data/processed/*.csv
+pipeline/outputs/*.csv
+*.pt
+
+# Raw clinical (AIIMS) wearable data — never commit patient data
+data/raw_data/*
+!data/raw_data/.gitkeep
