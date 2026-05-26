@@ -97,10 +97,13 @@ GAP_MULTIPLIER = 1.0               # threshold = GAP_MULTIPLIER * mean(minute_di
 # Stage 3 — smoothing / VAE hyperparameters (defaults — tune later)
 # --------------------------------------------------------------------------- #
 # Architecture matches the pasted CNN-VAE: two Conv1d layers (channels_1,
-# channels_2), kernel 5, full-resolution latent. window/stride/latent are the
-# agreed tunable defaults.
-VAE_WINDOW = 128
-VAE_STRIDE = 16
+# channels_2), kernel 5, full-resolution latent.
+#
+# Window/stride tuned to MEASURED segment-length distribution after chunking.
+# Patient 10: max segment = 108, so window 128 has 0% coverage; window 16 gives
+# 78% coverage (see `python -m pipeline.characterize <id>` to re-measure).
+VAE_WINDOW = 16                # was 128 — fits the median-9 segment regime
+VAE_STRIDE = 4                 # was 16 — proportional to the smaller window
 VAE_LATENT = 8
 VAE_CHANNELS = (32, 64)        # (channels_1, channels_2)
 VAE_KERNEL = 5

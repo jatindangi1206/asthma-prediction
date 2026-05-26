@@ -1,0 +1,12 @@
+=== Data-quality report: a59 ===
+HRV timeline: 624 rows, 2026-02-20 12:30:01 -> 2026-02-28 08:00:01 (7 days)
+
+signal      loaded  folder        raw_rows  coverage        file
+hrv         True    hrv           624       base            part-00000-6b85884a-b11b-4956-acdb-79f7edec30cd-c000.csv
+heartrate   True    heartrate     31664     95.0%           part-00000-c927b02d-9364-43e3-bb0e-a22c8879d6cd-c000.csv
+temperature True    temperature   3783      100.0%          part-00000-4bc77284-77b9-44d6-a8c4-fa1157569da1-c000.csv
+steps       True    steps         1274      34.5%           part-00000-043a357c-f4a4-4a29-9779-dc1a97d18c40-c000.csv
+sleep       True    sleep         165       23.9% asleep    part-00000-e5739cd9-9f9c-4c60-a126-9693f366677d-c000.csv
+spo2        True    spo2          1         0.8%            part-00000-8c3366f9-241c-45d3-a465-79bc67807fca-c000.csv
+
+watch_off (temp<90F): 9.5% of rows
