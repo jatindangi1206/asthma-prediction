@@ -1,5 +1,31 @@
 __pycache__/
 .venv/
+venv/
 *.pyc
 
+# Raw wearable data — bulky, contains all participants.
+# Ignore everything except participant 0010 (folder name includes literal quotes).
+/raw_data/*
+!/raw_data/"0010"/
+!/raw_data/processed_users.txt
 
+# Pipeline outputs: ignore everything under data/ ...
+/data/*
+
+# ... but keep participant 0010's data and plots only.
+# (each level must be re-included before the file inside it)
+!/data/processed/
+/data/processed/*
+!/data/processed/0010_processed.csv
+
+!/data/smoothed/
+/data/smoothed/*
+!/data/smoothed/0010_smoothed.csv
+
+!/data/annotated/
+/data/annotated/*
+!/data/annotated/0010_annotated.csv
+
+!/data/plots/
+/data/plots/*
+!/data/plots/0010_*.png

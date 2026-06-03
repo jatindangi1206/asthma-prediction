@@ -18,7 +18,7 @@ OUTPUT_DIR = Path("./data/smoothed")
 RESULTS_DIR = Path("./data/results")
 
 # Injected from Phase 1 (01_hyper_tuning.py) results
-GLOBAL_N = 100
+GLOBAL_N = 250
 GLOBAL_M = 50
 
 # ==============================================================================
@@ -62,14 +62,24 @@ class HRVParticleModel(ssm.StateSpaceModel):
 
     def PY(self, t, xp, x):
         observable_mean = x['level'] + x['c1'] + x['c2']
-        try:
-            y_t = self.data[t]
-        except (AttributeError, IndexError):
-            y_t = np.nan
-        # NaN -> flat likelihood; filter propagates on dynamics only
-        if np.isnan(y_t):
-            return dists.Student(df=self.nu, loc=observable_mean, scale=1e6)
         return dists.Student(df=self.nu, loc=observable_mean, scale=self.sigma_obs)
+
+
+class HRVBootstrap(ssm.Bootstrap):
+    """Bootstrap filter that treats NaN observations as missing.
+
+    In particles, the data lives on the FK (here), not on the ssm, so NaN
+    handling must happen in logG. logpdf(NaN) is always NaN regardless of
+    scale, and a single NaN log-weight corrupts every particle weight and
+    propagates downstream. We instead return uniform (zero) log-weights at
+    missing observations, so the filter propagates on the dynamics alone.
+    """
+
+    def logG(self, t, xp, x):
+        y_t = self.data[t]
+        if np.isnan(y_t):
+            return np.zeros(x['level'].shape[0])
+        return self.ssm.PY(t, xp, x).logpdf(y_t)
 
 
 def compute_data_driven_params(y_data, median_dt_minutes):
@@ -144,7 +154,7 @@ def process_patient(args):
         params = compute_data_driven_params(y_data, median_dt)
         params['dt_norm'] = dt_norm
 
-        fk = ssm.Bootstrap(ssm=HRVParticleModel(**params), data=y_data)
+        fk = HRVBootstrap(ssm=HRVParticleModel(**params), data=y_data)
         alg = particles.SMC(fk=fk, N=N_particles, resampling='systematic',
                             store_history=True, verbose=False)
         alg.run()

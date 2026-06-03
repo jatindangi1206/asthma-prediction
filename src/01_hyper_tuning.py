@@ -63,6 +63,23 @@ class HRVParticleModel(ssm.StateSpaceModel):
         observable_mean = x['level'] + x['c1'] + x['c2']
         return dists.Student(df=self.nu, loc=observable_mean, scale=self.sigma_obs)
 
+
+class HRVBootstrap(ssm.Bootstrap):
+    """Bootstrap filter that treats NaN observations as missing.
+
+    In particles, the data lives on the FK (here), not on the ssm, so NaN
+    handling must happen in logG. logpdf(NaN) is always NaN regardless of
+    scale, and a single NaN log-weight corrupts every particle weight and
+    propagates downstream. We instead return uniform (zero) log-weights at
+    missing observations, so the filter propagates on the dynamics alone.
+    """
+
+    def logG(self, t, xp, x):
+        y_t = self.data[t]
+        if np.isnan(y_t):
+            return np.zeros(x['level'].shape[0])
+        return self.ssm.PY(t, xp, x).logpdf(y_t)
+
 def compute_data_driven_params(y_data, mean_dt_minutes):
     y = y_data.astype(float)
     n_per_day = max(int(24 * 60 / mean_dt_minutes), 50)
@@ -131,8 +148,8 @@ def process_single_patient(file_path):
         def _eval_N(N):
             ess_medians, ess_mins = [], []
             for i in range(5): 
-                np.random.seed(42 + i) 
-                fk = ssm.Bootstrap(ssm=HRVParticleModel(**params), data=y)
+                np.random.seed(42 + i)
+                fk = HRVBootstrap(ssm=HRVParticleModel(**params), data=y)
                 alg = particles.SMC(fk=fk, N=N, resampling='systematic', store_history=True, verbose=False)
                 alg.run()
                 ess_over_N = np.array([w.ESS for w in alg.hist.wgts]) / N
@@ -151,7 +168,7 @@ def process_single_patient(file_path):
                 break
 
         np.random.seed(42)
-        fk_m = ssm.Bootstrap(ssm=HRVParticleModel(**params), data=y)
+        fk_m = HRVBootstrap(ssm=HRVParticleModel(**params), data=y)
         alg_m = particles.SMC(fk=fk_m, N=N_star, resampling='systematic', store_history=True, verbose=False)
         alg_m.run()
 
