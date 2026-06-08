@@ -60,7 +60,8 @@ OUT_DIR.mkdir(parents=True, exist_ok=True)
 # ═══════════════════════════════════════════════════════════════════════════
 
 def compute_stats(df: pd.DataFrame, stem: str) -> dict:
-    s = df["smoothed_hrv"].dropna().values
+    eda_col = "true_trend_level" if "true_trend_level" in df.columns else "smoothed_hrv"
+    s = df[eda_col].dropna().values
     n = len(s)
     d = {"patient": stem, "n_smoothed": n}
 
@@ -155,10 +156,10 @@ def compute_stats(df: pd.DataFrame, stem: str) -> dict:
     # gap boundaries). Cross-boundary diffs (e.g. 80 ms jumps after a 6-hour
     # gap) would inflate kurtosis massively and are not signal noise.
     if "createdTime" in df.columns:
-        df_valid  = df[["createdTime", "smoothed_hrv"]].dropna(subset=["smoothed_hrv"])
+        df_valid  = df[["createdTime", eda_col]].dropna(subset=[eda_col])
         t_gap_min = pd.to_datetime(df_valid["createdTime"]).diff().dt.total_seconds().div(60)
         within    = (t_gap_min <= 15.0).values   # True = consecutive within same chunk
-        raw_diffs = np.diff(df_valid["smoothed_hrv"].values)
+        raw_diffs = np.diff(df_valid[eda_col].values)
         diffs     = raw_diffs[within[1:]]        # drop the first element (NaN diff)
     else:
         diffs = np.diff(s)  # fallback: no time column
@@ -214,15 +215,16 @@ def compute_stats(df: pd.DataFrame, stem: str) -> dict:
 # ═══════════════════════════════════════════════════════════════════════════
 
 def plot_eda(df: pd.DataFrame, stem: str, st: dict) -> Path:
-    s    = df["smoothed_hrv"].dropna().values
+    eda_col = "true_trend_level" if "true_trend_level" in df.columns else "smoothed_hrv"
+    s    = df[eda_col].dropna().values
     t    = pd.to_datetime(df["createdTime"])
     raw  = df["hrvValue"].values if "hrvValue" in df.columns else None
 
     # within-segment first diffs (same logic as compute_stats H6)
-    df_valid  = df[["createdTime", "smoothed_hrv"]].dropna(subset=["smoothed_hrv"])
+    df_valid  = df[["createdTime", eda_col]].dropna(subset=[eda_col])
     t_gap_min = pd.to_datetime(df_valid["createdTime"]).diff().dt.total_seconds().div(60)
     within    = (t_gap_min <= 15.0).values
-    raw_diffs = np.diff(df_valid["smoothed_hrv"].values)
+    raw_diffs = np.diff(df_valid[eda_col].values)
     diffs     = raw_diffs[within[1:]]
 
     fig = plt.figure(figsize=(20, 15))
@@ -234,8 +236,8 @@ def plot_eda(df: pd.DataFrame, stem: str, st: dict) -> Path:
     ax0 = fig.add_subplot(gs[0, :])
     if raw is not None:
         ax0.scatter(t, raw, s=1, color="lightcoral", alpha=0.25, zorder=1, label="Raw HRV")
-    ax0.plot(t, df["smoothed_hrv"], color="#22409A", lw=0.9, zorder=2, label="Smoothed HRV")
-    roll = df["smoothed_hrv"].rolling(LAGS_DAY, min_periods=LAGS_DAY // 4, center=True)
+    ax0.plot(t, df[eda_col], color="#22409A", lw=0.9, zorder=2, label=eda_col)
+    roll = df[eda_col].rolling(LAGS_DAY, min_periods=LAGS_DAY // 4, center=True)
     rm, rs = roll.mean(), roll.std()
     ax0.plot(t, rm, color="darkorange", lw=2.0, zorder=3, label="24h rolling mean")
     ax0.fill_between(t, rm - rs, rm + rs, color="orange", alpha=0.20, label="±1σ rolling")
@@ -345,7 +347,7 @@ def plot_eda(df: pd.DataFrame, stem: str, st: dict) -> Path:
 
     # ── Row 2 col 2: Rolling std (non-stationarity) ───────────────────────
     ax6 = fig.add_subplot(gs[2, 2])
-    rls = df["smoothed_hrv"].rolling(LAGS_DAY, min_periods=1, center=True).std()
+    rls = df[eda_col].rolling(LAGS_DAY, min_periods=1, center=True).std()
     ax6.plot(t, rls, color="darkorange", lw=0.9)
     adf_p  = st.get("h4_adf_pvalue")
     cv     = st.get("h4_rolling_std_cv")

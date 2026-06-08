@@ -145,8 +145,10 @@ def _per_method_plot(df, method_name, type_col, color, stem, output_dir, gap_min
 
     fig, ax = plt.subplots(figsize=(16, 4.5))
     ax.scatter(t, y, s=2, color='red', alpha=0.25, label='Observed')
-    if 'smoothed_hrv' in df.columns:
-        ax.plot(t, df['smoothed_hrv'], color='#22409A', linewidth=1.0, label='Smoothed')
+    if 'true_trend_level' in df.columns:
+        ax.plot(t, df['true_trend_level'], color='#0B7B3E', linewidth=1.0, label='Trend (level only)')
+    elif 'smoothed_hrv' in df.columns:
+        ax.plot(t, df['smoothed_hrv'], color='#22409A', linewidth=1.0, label='Smoothed (fallback)')
 
     for gt in gap_times:
         ax.axvline(gt, color='orange', linestyle='--', linewidth=0.5, alpha=0.4)
@@ -156,7 +158,7 @@ def _per_method_plot(df, method_name, type_col, color, stem, output_dir, gap_min
         ax.plot([], [], color=color, linewidth=1.2,
                 label=f'{method_name} shift (n={len(shift_times)})')
 
-    ax.set_title(f'{stem}  —  {method_name} change points on smoothed HRV', fontsize=11)
+    ax.set_title(f'{stem}  —  {method_name} change points on trend (level only, circadian removed)', fontsize=11)
     ax.set_ylabel('HRV')
     ax.set_xlabel('Time')
     ax.legend(loc='upper right', fontsize=9)
