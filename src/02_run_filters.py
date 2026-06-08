@@ -161,15 +161,28 @@ def process_patient(args):
 
         trajectories = alg.hist.backward_sampling_ON2(M_paths)
 
+        # Extract both the full observable (level + circadian) and the pure level.
+        # smoothed_hrv     = level + c1 + c2  (includes 24h and 12h harmonics)
+        # true_trend_level = level only        (baseline drift, circadian removed)
         observable_paths = np.zeros((M_paths, T))
+        level_paths      = np.zeros((M_paths, T))
         for t in range(T):
-            observable_paths[:, t] = (
-                trajectories[t]['level'] + trajectories[t]['c1'] + trajectories[t]['c2']
-            )
+            lv = trajectories[t]['level']
+            c1 = trajectories[t]['c1']
+            c2 = trajectories[t]['c2']
+            observable_paths[:, t] = lv + c1 + c2
+            level_paths[:, t]      = lv
 
-        df['smoothed_hrv'] = np.mean(observable_paths, axis=0)
+        df['smoothed_hrv']     = np.mean(observable_paths, axis=0)
+        df['true_trend_level'] = np.mean(level_paths, axis=0)
 
-        out_cols = ['createdTime', 'hrvValue', 'minute_diff', 'smoothed_hrv']
+        # gap_flag: 1 where the original observation was missing (gap-fill row),
+        # 0 where a real HRV measurement exists.  Downstream steps use this to
+        # identify segment boundaries without needing to inspect smoothed values.
+        df['gap_flag'] = df['hrvValue'].isna().astype(int)
+
+        out_cols = ['createdTime', 'hrvValue', 'minute_diff',
+                    'smoothed_hrv', 'true_trend_level', 'gap_flag']
         stem = file_path.stem.replace('_processed', '')
         out_file = Path(output_dir) / f"{stem}_smoothed.csv"
         df[out_cols].to_csv(out_file, index=False)

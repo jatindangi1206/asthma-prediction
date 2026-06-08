@@ -40,7 +40,15 @@ def annotate_patient(file_path: Path) -> dict:
         df["createdTime"] = pd.to_datetime(df["createdTime"])
         df = df.sort_values("createdTime").reset_index(drop=True)
 
-        values = df["smoothed_hrv"].values.astype(float)
+        # Prefer true_trend_level (level only, circadian removed) so CPD methods
+        # detect sustained baseline shifts rather than normal day/night oscillations.
+        # Fall back to smoothed_hrv for older smoothed files that pre-date the fix.
+        if "true_trend_level" in df.columns:
+            cpd_col = "true_trend_level"
+        else:
+            cpd_col = "smoothed_hrv"
+
+        values = df[cpd_col].values.astype(float)
 
         # Elapsed minutes from start — used as the time axis for Kalman CPD
         elapsed_min = (
@@ -53,11 +61,15 @@ def annotate_patient(file_path: Path) -> dict:
             df[f"{method_name}_type"]   = types
             df[f"{method_name}_degree"] = degrees
 
+        # Record which column was used for CPD so downstream steps can verify
+        df["cpd_input_col"] = cpd_col
+
         stem = file_path.stem.replace("_smoothed", "")
         out_file = OUTPUT_DIR / f"{stem}_annotated.csv"
         df.to_csv(out_file, index=False)
 
-        return {"file": file_path.name, "status": "success", "n_rows": len(df)}
+        return {"file": file_path.name, "status": "success",
+                "n_rows": len(df), "cpd_col": cpd_col}
 
     except Exception as e:
         return {"file": file_path.name, "status": "failed", "reason": str(e)}
@@ -76,7 +88,8 @@ def run_annotation() -> None:
     print(f"Input:    {INPUT_DIR.resolve()}")
     print(f"Output:   {OUTPUT_DIR.resolve()}")
     print(f"Patients: {len(csv_files)}")
-    print(f"Methods:  {[m for m, _ in METHODS]}\n")
+    print(f"Methods:  {[m for m, _ in METHODS]}")
+    print(f"CPD input: true_trend_level if present, else smoothed_hrv (fallback)\n")
 
     results = []
     for f in tqdm(csv_files, desc="Annotating"):
