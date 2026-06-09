@@ -42,7 +42,7 @@ raw_data/  →  data/processed/  →  data/smoothed/  →  data/annotated/
 
 5. **Visualization** (optional):
    ```
-   python src/visualize.py
+   python scripts/visualize.py
    ```
    Generates 4-panel diagnostic PNGs in `data/plots/`.
 

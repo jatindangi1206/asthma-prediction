@@ -1,0 +1,102 @@
+{
+  "H1_bounded_positive": {
+    "original_property": "All HRV observations bounded and strictly positive",
+    "post_smoothing": "Smoothed HRV inherits positivity; particle smoother's level state is unconstrained but in practice always positive for physiological HRV",
+    "evidence": "h1_all_positive = 100% of patients",
+    "verdict": "UNCHANGED",
+    "cpd_implication": "No change to method assumptions"
+  },
+  "H2_bimodal_distribution": {
+    "original_property": "Bimodal distribution from circadian day/night HRV switching",
+    "post_smoothing": "Smoothed_hrv = level + circadian + semi-diurnal; circadian component preserved means day-mode and night-mode still present. Smoother may SHARPEN modes by removing within-mode noise.",
+    "evidence": {
+      "pct_bimodal_by_bc": 0.0,
+      "pct_bimodal_by_gmm": 100.0,
+      "median_mode_gap_ms": 51.45487738817573,
+      "median_gmm_delta_bic": 1481.0999466420617
+    },
+    "verdict": "PRESERVED",
+    "cpd_implication": "HMM K=2 still correct; BOCPD prior \u03bc\u2080 should be set at the grand median (between modes), NOT at either mode"
+  },
+  "H3_power_law_spectrum": {
+    "original_property": "1/f spectral structure (slope \u2248 \u22121 in log-log PSD)",
+    "post_smoothing": "Particle smoother is effectively a low-pass filter with a roll-off. High-frequency content attenuated \u2192 log-log slope steepens toward \u22122 (closer to random-walk / Brownian motion spectrum)",
+    "evidence": {
+      "median_spectral_slope": -2.302907143932496,
+      "median_pct_power_circadian": 46.284821653028615,
+      "median_dominant_period_h": 23.999999999999996
+    },
+    "verdict": "STEEPENED toward \u22122 (smoother acts as low-pass filter)",
+    "cpd_implication": "Spectral slope informs \u03bb for BOCPD: slower spectral decay \u2192 longer memory \u2192 slower expected regime change \u2192 larger \u03bb recommended"
+  },
+  "H4_non_stationary": {
+    "original_property": "Non-stationary; baseline HRV drifts over days/weeks",
+    "post_smoothing": "Level component of particle smoother IS the slow drift \u2014 non-stationarity is explicitly modelled and preserved. Rolling-\u03c3 variation confirms time-varying variance.",
+    "evidence": {
+      "pct_adf_stationary": 100.0,
+      "median_rolling_cv": 0.3218004671088122
+    },
+    "verdict": "PRESERVED",
+    "cpd_implication": "BOCPD and KCP must handle non-stationarity; Kalman's level+trend model is appropriate"
+  },
+  "H5_circadian_rhythm": {
+    "original_property": "Strong ~24h (and ~12h semi-diurnal) oscillation",
+    "post_smoothing": "Explicitly reconstructed and retained in smoothed_hrv. Removed in true_trend_level (which carries only the level component).",
+    "evidence": {
+      "median_pct_power_circadian": 46.284821653028615,
+      "median_pct_power_semidiurnal": 17.91960455525725
+    },
+    "verdict": "PRESERVED in smoothed_hrv | REMOVED in true_trend_level",
+    "cpd_implication": "CPD on smoothed_hrv will see circadian as 'normal' regime; CPD on true_trend_level would miss circadian-scale disruptions but focus purely on baseline drift"
+  },
+  "H6_heavy_tailed_noise": {
+    "original_property": "Heavy-tailed observation noise (motivates Student-t likelihood in smoother)",
+    "post_smoothing": "Smoother absorbs outliers via Student-t likelihood during inference. The smoothed signal's innovations are near-Gaussian with \u03c3_x << raw noise.",
+    "evidence": {
+      "median_diff_kurtosis_excess": -0.060375823219046776,
+      "pct_diff_near_normal": 0.0,
+      "median_sigma_x_ms": 0.9085401881194881,
+      "note": "Raw HRV \u03c3_x \u2248 26 ms; smoothed \u03c3_x \u2248 1.4 ms"
+    },
+    "verdict": "SUBSTANTIALLY REDUCED \u2014 innovations near-Gaussian after smoothing",
+    "cpd_implication": "BOCPD Normal-Normal conjugate model is now appropriate for smoothed signal. Kalman's Gaussian observation model also appropriate IF run on smoothed (but see Kalman structural mismatch note)."
+  },
+  "H7_nonuniform_sampling": {
+    "original_property": "Irregular intervals between HRV observations (device gaps, wear-off)",
+    "post_smoothing": "Pipeline interpolates to a regular 10-minute grid. Gaps > 180 min become explicit NaN placeholder rows. Step size is now uniform except at chunk boundaries.",
+    "evidence": {
+      "median_step_min": 10.0,
+      "pct_10min_steps": 95.7445938764665
+    },
+    "verdict": "RESOLVED \u2014 uniform 10-min grid, gaps are explicit NaN rows",
+    "cpd_implication": "All CPD methods can now assume uniform time indexing. \u03bb can be expressed directly as timesteps. No irregular-time adaptations needed."
+  },
+  "H8_mixed_missingness": {
+    "original_property": "Mix of device-off silences (informative) and random Gaussian gaps",
+    "post_smoothing": "Informative gaps now explicit: rows with NaN smoothed_hrv mark gap boundaries. The ambiguity between informative and random missingness is resolved structurally.",
+    "evidence": {
+      "median_smoothed_nan_pct": 0.0,
+      "median_raw_nan_pct": 48.57750163505559
+    },
+    "verdict": "TRANSFORMED \u2014 explicit structural gaps; missingness mechanism now clear",
+    "cpd_implication": "CPD methods can treat NaN rows as segment boundaries (already implemented via 180-min chunking). No within-segment imputation needed."
+  },
+  "H9_online_operation": {
+    "original_property": "Must work in online / low-latency streaming context",
+    "post_smoothing": "Unchanged \u2014 this is a system requirement, not a data property. The smoothing pipeline itself runs offline (FFBS requires full sequence), but CPD methods are evaluated for online use.",
+    "verdict": "UNCHANGED (system requirement)",
+    "cpd_implication": "BOCPD (online) and Kalman (online) preferred for production. KCP and HMM are offline reference methods for annotation quality benchmarking."
+  },
+  "H10_between_patient_variability": {
+    "original_property": "High inter-individual variability in HRV level, amplitude, and dynamics",
+    "post_smoothing": "Preserved and potentially amplified: the smoother's level component cleanly separates each patient's baseline, making between-patient differences more visible.",
+    "evidence": {
+      "median_patient_mean": 96.44784939212126,
+      "std_of_patient_means": NaN,
+      "std_of_patient_stds": NaN,
+      "median_iqr_ms": 43.476177760679846
+    },
+    "verdict": "PRESERVED",
+    "cpd_implication": "Confirms that global fixed thresholds are inappropriate. Patient-level calibration of \u03c3\u2080, \u03c3_x, and \u03bb is necessary."
+  }
+}

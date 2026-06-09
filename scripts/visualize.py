@@ -37,6 +37,13 @@ def _load_patient(annotated_csv, gap_minutes):
     df = df.sort_values('createdTime').reset_index(drop=True)
     df['time_diff'] = df['createdTime'].diff()
     df['is_new_segment'] = (df['time_diff'] > pd.Timedelta(minutes=gap_minutes)).astype(int)
+
+    # Blank extrapolated values in gap rows so they are not plotted as inferred.
+    if 'gap_flag' in df.columns:
+        gap_mask = df['gap_flag'] == 1
+        for col in ['smoothed_hrv', 'true_trend_level', 'ci_lower_95', 'ci_upper_95']:
+            if col in df.columns:
+                df.loc[gap_mask, col] = np.nan
     return df
 
 

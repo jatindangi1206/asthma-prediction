@@ -29,3 +29,14 @@ venv/
 !/data/plots/
 /data/plots/*
 !/data/plots/0010_*.png
+
+# EDA results: keep only participant 0010 and global summary figures,
+# plus the two JSON/CSV summary files. Ignore all other per-patient PNGs.
+!/data/results/
+/data/results/*
+!/data/results/eda_smoothed/
+/data/results/eda_smoothed/*
+!/data/results/eda_smoothed/0010_eda.png
+!/data/results/eda_smoothed/global_eda.png
+!/data/results/eda_smoothed/all_patients_summary.csv
+!/data/results/eda_smoothed/hrv_characteristics_post_smoothing.json
