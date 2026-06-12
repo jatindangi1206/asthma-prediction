@@ -1,4 +1,3 @@
-import os
 import pandas as pd
 import numpy as np
 import warnings
@@ -12,6 +11,7 @@ warnings.filterwarnings("ignore")
 import particles
 from particles import distributions as dists
 from particles import state_space_models as ssm
+from scipy.special import expit, logit
 
 INPUT_DIR = Path("./data/processed")
 OUTPUT_DIR = Path("./data/smoothed")
@@ -21,173 +21,175 @@ RESULTS_DIR = Path("./data/results")
 GLOBAL_N = 250
 GLOBAL_M = 50
 
+# Observed segments shorter than this are too few points to filter; left NaN.
+MIN_SEGMENT_ROWS = 10
+
 # ==============================================================================
 # 1. STATE-SPACE MODEL
 # ==============================================================================
 class HRVParticleModel(ssm.StateSpaceModel):
+    """Bounded local-level + two circadian harmonics, in logit space.
+
+    The observable is lo + (hi-lo)*sigmoid(level + c1 + c2), so every smoothed
+    value is confined to (lo, hi) — encoding H1 (HRV is bounded and saturates at
+    a ceiling). The latent states (level, harmonics) live in unbounded logit
+    units; the sigmoid absorbs ceiling saturation instead of overshooting it.
+    No deterministic slope (H4: drift is mild → a random-walk level suffices and
+    cannot extrapolate). Gaussian observation (H6: first differences near-normal).
+    """
     default_params = {
-        'sigma_level': 0.5, 'sigma_slope': 0.02, 'sigma_seas': 0.15,
-        'sigma_obs': 12.0, 'nu': 4.0,
-        'init_level_loc': 95.0, 'init_level_scale': 30.0,
+        'sigma_level': 0.05, 'sigma_seas': 0.01, 'sigma_obs': 10.0,
+        'lo': 0.0, 'hi': 1.0,
+        'z_level_loc': 0.0, 'z_level_scale': 1.0, 'z_seas_scale': 1.0,
         'omega1': 2 * np.pi / 144, 'omega2': 2 * np.pi / 72,
         'dt_norm': None,
     }
 
+    def _observable(self, x):
+        return self.lo + (self.hi - self.lo) * expit(x['level'] + x['c1'] + x['c2'])
+
     def PX0(self):
         return dists.StructDist({
-            'level':   dists.Normal(loc=self.init_level_loc, scale=self.init_level_scale),
-            'slope':   dists.Normal(loc=0.0, scale=0.3),
-            'c1':      dists.Normal(loc=0.0, scale=35.0),
-            'c1_star': dists.Normal(loc=0.0, scale=35.0),
-            'c2':      dists.Normal(loc=0.0, scale=15.0),
-            'c2_star': dists.Normal(loc=0.0, scale=15.0),
+            'level':   dists.Normal(loc=self.z_level_loc, scale=self.z_level_scale),
+            'c1':      dists.Normal(loc=0.0, scale=self.z_seas_scale),
+            'c1_star': dists.Normal(loc=0.0, scale=self.z_seas_scale),
+            'c2':      dists.Normal(loc=0.0, scale=self.z_seas_scale / 2),
+            'c2_star': dists.Normal(loc=0.0, scale=self.z_seas_scale / 2),
         })
 
     def PX(self, t, xp):
         dt = self.dt_norm[t] if self.dt_norm is not None else 1.0
-        dt_sqrt = np.sqrt(dt)
-
-        level_mean = xp['level'] + xp['slope'] * dt
         a1, b1 = np.cos(self.omega1 * dt), np.sin(self.omega1 * dt)
         a2, b2 = np.cos(self.omega2 * dt), np.sin(self.omega2 * dt)
 
         return dists.StructDist({
-            'level':   dists.Normal(loc=level_mean,                                scale=self.sigma_level * dt_sqrt),
-            'slope':   dists.Normal(loc=xp['slope'],                               scale=self.sigma_slope * dt_sqrt),
-            'c1':      dists.Normal(loc=xp['c1'] * a1 + xp['c1_star'] * b1,       scale=self.sigma_seas),
-            'c1_star': dists.Normal(loc=-xp['c1'] * b1 + xp['c1_star'] * a1,      scale=self.sigma_seas),
-            'c2':      dists.Normal(loc=xp['c2'] * a2 + xp['c2_star'] * b2,       scale=self.sigma_seas),
-            'c2_star': dists.Normal(loc=-xp['c2'] * b2 + xp['c2_star'] * a2,      scale=self.sigma_seas),
+            'level':   dists.Normal(loc=xp['level'],                          scale=self.sigma_level * np.sqrt(dt)),
+            'c1':      dists.Normal(loc=xp['c1'] * a1 + xp['c1_star'] * b1,   scale=self.sigma_seas),
+            'c1_star': dists.Normal(loc=-xp['c1'] * b1 + xp['c1_star'] * a1,  scale=self.sigma_seas),
+            'c2':      dists.Normal(loc=xp['c2'] * a2 + xp['c2_star'] * b2,   scale=self.sigma_seas),
+            'c2_star': dists.Normal(loc=-xp['c2'] * b2 + xp['c2_star'] * a2,  scale=self.sigma_seas),
         })
 
     def PY(self, t, xp, x):
-        observable_mean = x['level'] + x['c1'] + x['c2']
-        return dists.Student(df=self.nu, loc=observable_mean, scale=self.sigma_obs)
+        return dists.Normal(loc=self._observable(x), scale=self.sigma_obs)
 
 
-class HRVBootstrap(ssm.Bootstrap):
-    """Bootstrap filter that treats NaN observations as missing.
+def compute_data_driven_params(y, median_dt_minutes, lo, hi):
+    """Data-driven SSM parameters for one observed segment (y has no NaN).
 
-    In particles, the data lives on the FK (here), not on the ssm, so NaN
-    handling must happen in logG. logpdf(NaN) is always NaN regardless of
-    scale, and a single NaN log-weight corrupts every particle weight and
-    propagates downstream. We instead return uniform (zero) log-weights at
-    missing observations, so the filter propagates on the dynamics alone.
+    Spreads are measured in logit space because that is where the latent states
+    live; sigma_obs stays in raw HRV units because the observation is raw HRV.
     """
-
-    def logG(self, t, xp, x):
-        y_t = self.data[t]
-        if np.isnan(y_t):
-            return np.zeros(x['level'].shape[0])
-        return self.ssm.PY(t, xp, x).logpdf(y_t)
-
-
-def compute_data_driven_params(y_data, median_dt_minutes):
-    y = y_data.astype(float)
+    z = logit(np.clip((y - lo) / (hi - lo), 1e-6, 1 - 1e-6))
     n_per_day = max(int(24 * 60 / median_dt_minutes), 50)
-    first_day_clean = y[:n_per_day][~np.isnan(y[:n_per_day])]
+    z_spread = max(float(1.4826 * np.median(np.abs(z - np.median(z)))), 0.2)
 
-    if len(first_day_clean) > 5:
-        init_level_loc = float(np.median(first_day_clean))
-        init_level_scale = float(max(2 * np.median(np.abs(first_day_clean - init_level_loc)), 10.0))
-    else:
-        init_level_loc = float(np.nanmedian(y))
-        init_level_scale = 20.0
-
-    diffs = np.diff(y)
-    diffs = diffs[~np.isnan(diffs)]
-    mad_diffs = np.median(np.abs(diffs - np.median(diffs))) if len(diffs) > 0 else 5.0
-
-    sigma_obs = max(float(1.4826 * mad_diffs / np.sqrt(2)), 3.0)
-    sigma_level = 0.05 * sigma_obs
-    sigma_slope = 0.02 * sigma_level
+    sigma_obs = max(float(1.4826 * np.median(np.abs(np.diff(y))) / np.sqrt(2)), 1.0)
     obs_per_day = 24 * 60 / median_dt_minutes
 
     return {
-        'init_level_loc':   init_level_loc,
-        'init_level_scale': init_level_scale,
-        'sigma_obs':        sigma_obs,
-        'sigma_level':      sigma_level,
-        'sigma_slope':      sigma_slope,
-        'sigma_seas':       0.15,
-        'omega1':           float(2 * np.pi / obs_per_day),
-        'omega2':           float(2 * np.pi / (obs_per_day / 2)),
+        'lo': float(lo), 'hi': float(hi),
+        'z_level_loc':   float(np.median(z[:n_per_day])),
+        'z_level_scale': z_spread / 2,            # baseline: slow, narrow prior
+        'z_seas_scale':  z_spread,                # harmonics carry the daily swing
+        'sigma_obs':     sigma_obs,
+        'sigma_level':   0.02 * z_spread,         # H4: slow baseline drift only
+        'sigma_seas':    0.01,                    # circadian shape ~ stable day-to-day
+        'omega1':        float(2 * np.pi / obs_per_day),
+        'omega2':        float(2 * np.pi / (obs_per_day / 2)),
     }
 
 
 # ==============================================================================
 # 2. WORKER
 # ==============================================================================
+def _smooth_segment(y, dt_norm, median_dt, lo, hi, N_particles, M_paths):
+    """Runs SMC + FFBS on one contiguous observed segment.
+
+    Returns (smoothed_hrv, true_trend_level), both squashed back to HRV units
+    and therefore inside (lo, hi):
+    smoothed_hrv     = sigmoid(level + c1 + c2)  (baseline + 24h/12h harmonics)
+    true_trend_level = sigmoid(level)            (baseline only, circadian removed)
+    """
+    params = compute_data_driven_params(y, median_dt, lo, hi)
+    params['dt_norm'] = dt_norm
+
+    fk = ssm.Bootstrap(ssm=HRVParticleModel(**params), data=y)
+    alg = particles.SMC(fk=fk, N=N_particles, resampling='systematic',
+                        store_history=True, verbose=False)
+    alg.run()
+
+    traj = alg.hist.backward_sampling_ON2(M_paths)
+    squash = lambda z: lo + (hi - lo) * expit(z)
+    observable = squash(np.array([x['level'] + x['c1'] + x['c2'] for x in traj]))
+    level = squash(np.array([x['level'] for x in traj]))
+    return observable.mean(axis=1), level.mean(axis=1)
+
+
 def process_patient(args):
     file_path, output_dir, N_particles, M_paths = args
     try:
-        if os.path.getsize(file_path) < 10:
-            return {'file': file_path.name, 'status': 'failed', 'reason': 'Empty file'}
-
         df = pd.read_csv(file_path, encoding='utf-8-sig')
         df.columns = df.columns.str.strip()
 
-        required = {'createdTime', 'hrvValue', 'minute_diff'}
-        if not required.issubset(df.columns):
+        if not {'createdTime', 'hrvValue', 'minute_diff'}.issubset(df.columns):
             return {'file': file_path.name, 'status': 'failed',
                     'reason': f'Missing columns. Found: {list(df.columns)}'}
 
         df['createdTime'] = pd.to_datetime(df['createdTime'])
         df = df.sort_values('createdTime').reset_index(drop=True)
 
-        y_data = df['hrvValue'].values.astype(float)
-        T = len(y_data)
+        # The filter runs independently per contiguous observed segment; gap-fill
+        # rows (gap_flag=1) stay NaN so nothing is interpolated across a
+        # >GAP_THRESHOLD_MIN gap. Segment ids increment at each observed/missing edge.
+        observed = df['hrvValue'].notna()
+        df['gap_flag'] = (~observed).astype(int)
+        df['smoothed_hrv'] = np.nan
+        df['true_trend_level'] = np.nan
+        seg_ids = (observed != observed.shift()).cumsum()
 
-        if T < 10:
-            return {'file': file_path.name, 'status': 'failed', 'reason': 'Too short (<10 rows)'}
+        # Sigmoid bounds = the patient's exact observed [min, max], shared across
+        # all of this patient's segments. The open-interval sigmoid keeps every
+        # smoothed value strictly inside (min, max); a mean asymptoting just under
+        # the ceiling is the correct denoised estimate for saturated HRV.
+        obs_vals = df.loc[observed, 'hrvValue'].to_numpy()
+        lo, hi = float(obs_vals.min()), float(obs_vals.max())
+        if hi - lo < 1.0:
+            return {'file': file_path.name, 'status': 'failed',
+                    'reason': 'observed range too narrow for bounded model'}
 
-        # Use pre-computed minute_diff; treat first row as nominal step
-        minute_diff = df['minute_diff'].values.astype(float)
-        minute_diff[0] = 0.0
-        valid_diffs = minute_diff[minute_diff > 0]
-        median_dt = float(np.median(valid_diffs)) if len(valid_diffs) > 0 else 10.0
+        n_segments = n_short = 0
+        for _, seg in df[observed].groupby(seg_ids[observed]):
+            if len(seg) < MIN_SEGMENT_ROWS:
+                n_short += 1
+                continue
 
-        dt_norm = minute_diff / median_dt
-        dt_norm[0] = 1.0
-        dt_norm = np.where(dt_norm <= 0, 1.0, dt_norm)  # guard zero/negative
+            # Segment-local time steps: first row restarts at the nominal step
+            # (its minute_diff is the preceding gap or NaN); guard duplicates.
+            diffs = seg['minute_diff'].to_numpy(dtype=float)
+            valid_diffs = diffs[1:][diffs[1:] > 0]
+            median_dt = float(np.median(valid_diffs)) if len(valid_diffs) else 10.0
+            dt_norm = diffs / median_dt
+            dt_norm[0] = 1.0
+            dt_norm[dt_norm <= 0] = 1.0
 
-        params = compute_data_driven_params(y_data, median_dt)
-        params['dt_norm'] = dt_norm
+            smoothed, level = _smooth_segment(seg['hrvValue'].to_numpy(), dt_norm,
+                                              median_dt, lo, hi, N_particles, M_paths)
+            df.loc[seg.index, 'smoothed_hrv'] = smoothed
+            df.loc[seg.index, 'true_trend_level'] = level
+            n_segments += 1
 
-        fk = HRVBootstrap(ssm=HRVParticleModel(**params), data=y_data)
-        alg = particles.SMC(fk=fk, N=N_particles, resampling='systematic',
-                            store_history=True, verbose=False)
-        alg.run()
-
-        trajectories = alg.hist.backward_sampling_ON2(M_paths)
-
-        # Extract both the full observable (level + circadian) and the pure level.
-        # smoothed_hrv     = level + c1 + c2  (includes 24h and 12h harmonics)
-        # true_trend_level = level only        (baseline drift, circadian removed)
-        observable_paths = np.zeros((M_paths, T))
-        level_paths      = np.zeros((M_paths, T))
-        for t in range(T):
-            lv = trajectories[t]['level']
-            c1 = trajectories[t]['c1']
-            c2 = trajectories[t]['c2']
-            observable_paths[:, t] = lv + c1 + c2
-            level_paths[:, t]      = lv
-
-        df['smoothed_hrv']     = np.mean(observable_paths, axis=0)
-        df['true_trend_level'] = np.mean(level_paths, axis=0)
-
-        # gap_flag: 1 where the original observation was missing (gap-fill row),
-        # 0 where a real HRV measurement exists.  Downstream steps use this to
-        # identify segment boundaries without needing to inspect smoothed values.
-        df['gap_flag'] = df['hrvValue'].isna().astype(int)
+        if n_segments == 0:
+            return {'file': file_path.name, 'status': 'failed',
+                    'reason': f'No observed segment >= {MIN_SEGMENT_ROWS} rows'}
 
         out_cols = ['createdTime', 'hrvValue', 'minute_diff',
                     'smoothed_hrv', 'true_trend_level', 'gap_flag']
         stem = file_path.stem.replace('_processed', '')
-        out_file = Path(output_dir) / f"{stem}_smoothed.csv"
-        df[out_cols].to_csv(out_file, index=False)
+        df[out_cols].to_csv(Path(output_dir) / f"{stem}_smoothed.csv", index=False)
 
-        return {'file': file_path.name, 'status': 'success', 'n_rows': T}
+        return {'file': file_path.name, 'status': 'success', 'n_rows': len(df),
+                'n_segments': n_segments, 'n_short_skipped': n_short}
 
     except Exception as e:
         return {'file': file_path.name, 'status': 'failed', 'reason': str(e)}

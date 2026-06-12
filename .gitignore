@@ -3,6 +3,8 @@ __pycache__/
 venv/
 *.pyc
 
+raw_data.zip
+
 # Raw wearable data — bulky, contains all participants.
 # Ignore everything except participant 0010 (folder name includes literal quotes).
 /raw_data/*

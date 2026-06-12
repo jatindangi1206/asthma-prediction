@@ -10,3 +10,4 @@ ruptures==1.1.10
 hmmlearn==0.3.3
 jupyter==1.1.1
 ipykernel==6.29.5
+plotly==6.8.0
