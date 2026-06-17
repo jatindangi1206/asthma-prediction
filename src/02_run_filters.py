@@ -183,8 +183,11 @@ def process_patient(args):
             return {'file': file_path.name, 'status': 'failed',
                     'reason': f'No observed segment >= {MIN_SEGMENT_ROWS} rows'}
 
+        # Track B − Track A residual (NOTE: this smoother's smoothed_hrv is FFBS,
+        # i.e. non-causal; its residual is for offline comparison only).
+        df['residual_hrv'] = df['hrvValue'] - df['smoothed_hrv']
         out_cols = ['createdTime', 'hrvValue', 'minute_diff',
-                    'smoothed_hrv', 'true_trend_level', 'gap_flag']
+                    'smoothed_hrv', 'true_trend_level', 'residual_hrv', 'gap_flag']
         stem = file_path.stem.replace('_processed', '')
         df[out_cols].to_csv(Path(output_dir) / f"{stem}_smoothed.csv", index=False)
 

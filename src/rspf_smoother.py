@@ -517,6 +517,8 @@ def smooth_dataframe(
         work.loc[pdf.index, out_col] = smoothed
         work.loc[pdf.index, baseline_col] = baseline
 
+    # Track B − Track A residual the CPD ensemble consumes (raw − smoothed).
+    work["residual_hrv"] = pd.to_numeric(work[value_col], errors="coerce") - work[out_col]
     return work
 
 

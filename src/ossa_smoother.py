@@ -172,6 +172,8 @@ def smooth_dataframe(df, patient_col="patient_id", timestamp_col="timestamp",
             xf = _smooth_chunk(z, cfg)
             res[idx] = np.exp(np.clip(xf + log_mean, log_lo, log_hi))   # H1 >0
         work.loc[pdf.index, out_col] = res
+    # Track B − Track A residual the CPD ensemble consumes (raw − smoothed).
+    work["residual_hrv"] = pd.to_numeric(work[value_col], errors="coerce") - work[out_col]
     return work
 
 

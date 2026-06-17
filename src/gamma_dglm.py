@@ -371,6 +371,8 @@ def smooth_dataframe(df, patient_col="patient_id", timestamp_col="timestamp",
             out = model.filter(t_min[idx] - t_min[idx[0]], hrv[idx])   # H8 reset, H9 causal
             res[idx] = out["mu"]
         work.loc[pdf.index, out_col] = res
+    # Track B − Track A residual the CPD ensemble consumes (raw − smoothed).
+    work["residual_hrv"] = pd.to_numeric(work[value_col], errors="coerce") - work[out_col]
     return work
 
 

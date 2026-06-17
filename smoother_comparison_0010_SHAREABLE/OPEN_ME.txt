@@ -1,0 +1,10 @@
+HRV Smoother Comparison — Patient 0010
+=======================================
+
+Open  smoother_comparison_0010.html  in any web browser
+(Chrome, Safari, Edge, Firefox). Just double-click it.
+
+No internet connection and no software install are required —
+the charts are fully embedded. Scroll for the summary table,
+metric definitions, and the synchronized per-method charts
+(drag to zoom; the x-axes move together).

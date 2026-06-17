@@ -78,9 +78,11 @@ def process_patient(args):
 
         observed = res["hrvValue"].notna()
         res["gap_flag"] = (~observed).astype(int)
+        # Track B − Track A: the residual the CPD ensemble runs on.
+        res["residual_hrv"] = res["hrvValue"] - res["smoothed_hrv"]
 
         out_cols = ["createdTime", "hrvValue", "minute_diff", "smoothed_hrv",
-                    "gap_flag", "chunk_id"]
+                    "residual_hrv", "gap_flag", "chunk_id"]
         Path(output_dir).mkdir(parents=True, exist_ok=True)
         res[out_cols].to_csv(Path(output_dir) / f"{stem}_ossa.csv", index=False)
 
