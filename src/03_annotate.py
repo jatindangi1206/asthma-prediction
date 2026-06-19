@@ -53,6 +53,7 @@ SMOOTHERS = {
     "logmhw":    ("data/smoothed_logmhw",     "_logmhw"),
     "hrkf":      ("data/smoothed_hrkf",       "_hrkf"),
     "anrewma":   ("data/smoothed_anrewma",    "_anrewma"),
+    "ctimm":     ("data/smoothed_ctimm",      "_ctimm"),
 }
 
 GAP_THRESHOLD_MIN = 180.0
