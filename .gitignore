@@ -42,3 +42,7 @@ raw_data.zip
 !/data/results/eda_smoothed/global_eda.png
 !/data/results/eda_smoothed/all_patients_summary.csv
 !/data/results/eda_smoothed/hrv_characteristics_post_smoothing.json
+
+
+
+!/data/modeling/
