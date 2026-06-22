@@ -43,7 +43,12 @@ class KRLSTConfig:
     c: float = 5.0                     # noise-to-signal ratio (bigger=smoother)
     forgetting_lambda: float = 0.99    # lambda in [0,1]; <1 tracks a drifting baseline
     forgetmode: str = "B2P"            # back-to-prior (recommended) or "UI"
-    jitter: float = 1e-8
+    jitter: float = 1e-6               # Gram regularization. 1e-8 under-regularizes:
+                                       #   patients with near-duplicate timestamps
+                                       #   (sub-minute gaps) drive the inverse-Gram Q
+                                       #   to overflow (inf/nan -> crash). 1e-6 keeps Q
+                                       #   bounded (~1e6) cohort-wide; output is
+                                       #   converged (1e-6 vs 1e-4 differ <0.02% of range).
 
 
 # ==============================================================================
@@ -116,19 +121,26 @@ class KRLST:
             else:
                 errors = (self.Q @ self.mu).reshape(-1) / np.diag(self.Q)
                 criterium = np.abs(errors)
+            # Drop exactly the single least-useful basis element r. A non-finite
+            # criterium (numerical blow-up) is steered to drop the newest point.
+            criterium = np.where(np.isfinite(criterium), criterium, np.inf)
+            if not np.isfinite(criterium).any():
+                criterium[-1] = -np.inf          # all bad -> undo the just-added point
             r = int(np.argmin(criterium))
-            smaller = criterium > criterium[r]
+            keep = np.ones(self.m, dtype=bool)   # FIX: "all except r" (the original
+            keep[r] = False                      #   `criterium > criterium[r]` dropped
+                                                 #   every tie/NaN -> 0-size Q crash)
             if r == self.m - 1:                  # FIX: original tested r==self.m (never true)
                 self.Q = Q_old
             else:
-                Qs, qs = self.Q[smaller, r], self.Q[r, r]
-                self.Q = self.Q[smaller][:, smaller]
+                Qs, qs = self.Q[keep, r], self.Q[r, r]
+                self.Q = self.Q[keep][:, keep]
                 self.Q = self.Q - (Qs.reshape(-1, 1) * Qs.reshape(1, -1)) / qs
-            self.mu = self.mu[smaller]
-            self.Sigma = self.Sigma[smaller][:, smaller]
-            self.basis = self.basis[smaller]
+            self.mu = self.mu[keep]
+            self.Sigma = self.Sigma[keep][:, keep]
+            self.basis = self.basis[keep]
             self.m -= 1
-            self.Xb = self.Xb[smaller, :]
+            self.Xb = self.Xb[keep, :]
 
     def predict(self, X: np.ndarray) -> np.ndarray:
         """Posterior mean at X using the current (past-only) state."""
