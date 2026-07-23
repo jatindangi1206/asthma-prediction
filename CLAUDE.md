@@ -27,8 +27,19 @@ HRV erases the volatility bursts that signal an attack. So:
 raw_data/<pid>/hrv/*.csv
   └─ 00_preprocess_raw.py        → data/processed/<pid>_processed.csv
        └─ 02x_run_<method>.py    → data/smoothed_<method>/<pid>_<method>.csv   (Track A + residual_hrv)
-            └─ 03_annotate.py <method> → data/annotated_<method>/<pid>_<method>_annotated.csv  (ML target Y)
+            └─ 03a_calibrate.py <method> → data/calibrated_<method>/<pid>_<method>_calib.csv  (adaptive baseline; OPTIONAL)
+                 └─ 03_annotate.py <method> → data/annotated_<method>/<pid>_<method>_annotated.csv  (ML target Y)
 ```
+
+**Stage 03a (optional, additive):** replaces 03's one-shot 144-sample burn-in with a
+causal adaptive baseline — grows while the circadian-detrended residual is stationary,
+freezes when the estimate stops moving, caps at the ~21-day drift horizon — plus
+gap-aware carry/restart (carry <24h; keep-but-verify 1–21d, flagging the returning
+point as `candidate_event`; restart burn-in ≥21d). It emits per-patient
+`calib_segment,calib_m0,calib_sigma0,calib_sigma_infl,armed,candidate_event`. **03
+uses it automatically if `data/calibrated_<method>/` exists, and falls back to its
+inline burn-in otherwise — running 03a is purely additive, nothing else changes.**
+Self-test: `python src/03a_calibrate.py selftest` (asserts H9 truncation + gap logic).
 
 All methods obey a shared **H-Framework** (documented per-module and in
 `HRV_Smoothing_Methods_Explained.docx`): H1 positivity, H2/H4 drifting multimodal

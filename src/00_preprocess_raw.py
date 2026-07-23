@@ -6,9 +6,8 @@ from tqdm import tqdm
 RAW_DATA_DIR = Path("./raw_data")
 OUTPUT_DIR = Path("./data/processed")
 PATIENT_LIST = RAW_DATA_DIR / "processed_users.txt"
-GAP_THRESHOLD_MIN = 180
-FILL_INTERVAL_MIN = 10
-
+GAP_THRESHOLD_MIN = 180 # Decided by Domain by looking at the distribution of time gaps in the raw data.
+FILL_INTERVAL_MIN = 10  # later we have put all other data like steps,temperature, etc on the same timeline so we want to create a minute level x-axis for our data.
 def _load_hrv_csvs(patient_dir: Path) -> pd.DataFrame:
     """Loads and concatenates valid HRV CSVs, extracting only required columns."""
     csv_paths = [p for p in patient_dir.glob("hrv/*.csv") if not p.name.startswith((".", "_"))]

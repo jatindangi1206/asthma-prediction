@@ -1,49 +1,52 @@
 """Stage 04 — Build the ML-ready modeling dataset for ONE patient.
 
-Consolidates a patient's entire physiological timeline into a single
-timestamp-aligned CSV: raw channels (HR, sleep, SpO2, steps, temp, raw HRV) +
-the chosen smoother's baseline/residual + the CPD annotations computed on that
-residual + calendar features.
+Consolidates a patient's physiological timeline into a single timestamp-aligned
+CSV: the raw channels (heart rate, temperature, steps, SpO2, sleep stage, raw
+HRV) + the chosen smoother's baseline/residual + the CPD annotations computed on
+that residual.
+
+We do NOT invent or aggregate anything. Each channel keeps its ORIGINAL column
+name and its ORIGINAL recorded value; we only place that value on the master
+timeline at the right time.
 
 Run from the asthma-prediction/ directory:
     python src/04_build_modeling_dataset.py
 
 ================================================================================
-MERGING PHILOSOPHY (why it is built this way)
+MERGING LOGIC
 ================================================================================
 1. MASTER TIMELINE = the 10-minute HRV grid.
    The annotated file (`data/annotated_<method>/<pid>_<method>_annotated.csv`)
-   already contains the full grid — raw `hrvValue`, `smoothed_hrv`,
-   `residual_hrv`, `chunk_id`, `gap_flag`, and every CPD column — produced on the
-   exact residual the CPD ran on. We take it as the spine and align the OTHER
-   raw channels onto its timestamps. This guarantees the smoother, the residual,
-   and the annotations are never re-aligned (they were computed together).
+   already holds the full grid — raw `hrvValue`, `smoothed_hrv`, `residual_hrv`,
+   `gap_flag`, `chunk_id`, and every CPD column — produced on the exact residual
+   the CPD ran on. It is the spine; the other raw channels are placed onto its
+   `createdTime` timestamps. The smoother / residual / annotations are never
+   re-aligned (they were computed together).
 
-2. CAUSAL ALIGNMENT (no future leakage).
-   This feeds a real-time early-warning model, so a feature at time t may use
-   only data with timestamp <= t. Every channel is therefore aligned with a
-   BACKWARD-looking rule:
-     • high-frequency channels (HR, temperature) -> aggregate the PRECEDING
-       `window_min` window (mean/min/max) ending at t. Denoises and is causal.
-     • interval-count channels (steps, distance)  -> SUM over the preceding
-       window ending at t.
-     • sparse spot channels (SpO2)                -> last value AS-OF t (backward
-       merge) within a long tolerance, plus its staleness in minutes.
-     • sleep sessions                              -> `is_asleep` = t falls inside
-       a recorded [start, end] session; the 5-min epoch stage code as-of t.
+2. PLACING A CHANNEL'S VALUE (causal, no future leakage).
+   This feeds a real-time early-warning model, so a value at time t may use only
+   data with timestamp <= t. Each non-HRV channel is joined with a BACKWARD
+   as-of merge: the most recent recorded reading at or before t, within
+   ASOF_TOLERANCE_MIN (so a reading is not carried across a long gap). The
+   ORIGINAL value is written under the channel's ORIGINAL column name:
+        heart rate  -> lastRate
+        temperature -> temperature
+        steps       -> steps
+        SpO2        -> spo2Value
 
-3. KEEP THE FULL GRID (including gap-filler rows).
-   Even where HRV is missing (gap_flag=1), HR/steps/sleep may exist and give the
-   model context; the gap_flag lets the model mask. Nothing is interpolated
-   across the 180-min voids — those are real `gap_flag=1` rows.
+3. SLEEP STAGE.
+   The sleep file stores, per session [logDateTime, logEndTime], a `description`
+   string of 5-minute stage codes (e.g. "176~30~30~80~120~..."). For each grid
+   timestamp inside a session we write the actual code active at that 5-minute
+   epoch into `sleep_stage`. Timestamps outside any session are left blank (no
+   sleep was recorded — nothing is invented).
 
-4. CALENDAR FEATURES.  time-of-day is sin/cos encoded (24 h period) so the model
-   sees the circadian phase the residual was normalized against.
+4. KEEP THE FULL GRID. Rows where HRV is missing keep `gap_flag=1`; nothing is
+   interpolated across the 180-min voids.
 """
 
 from __future__ import annotations
 
-import sys
 import warnings
 from pathlib import Path
 
@@ -58,32 +61,24 @@ warnings.filterwarnings("ignore")
 PATIENT_ID        = "0010"        # patient to build
 SMOOTHING_METHOD  = "gammadglm"   # which Track-A smoother's baseline/residual to use
 ANNOTATION_METHOD = SMOOTHING_METHOD   # which annotated_<m> dir to pull CPD from
-                                       #   (CPD ran on THIS method's residual)
 CPD_FEATURE_MODE  = "all"         # "ensemble" | "all" | list e.g. ["bocpd","hmm"]
 
+ASOF_TOLERANCE_MIN = 60           # max minutes a reading may be carried forward to a grid point
+
 RAW_ROOT   = Path("raw_data")
-SMOOTH_DIR = Path(f"data/smoothed_{SMOOTHING_METHOD}")
 ANNOT_DIR  = Path(f"data/annotated_{ANNOTATION_METHOD}")
 OUT_DIR    = Path("data/modeling")
 
-# Channel registry — add a raw channel by adding one entry. Each is aligned onto
-# the master HRV grid with the causal rule named in `align`.
+# Channel registry — each raw channel is placed on the grid by a backward as-of
+# merge. The ORIGINAL value column name is kept as the output column name.
 RAW_CHANNELS = {
-    "heart_rate": dict(subdir="heartrate",   time="logDateTime", value="lastRate",
-                       align="window", window_min=10,
-                       aggs={"hr_mean": "mean", "hr_min": "min", "hr_max": "max"}),
-    "temperature": dict(subdir="temperature", time="createdTime", value="temperature",
-                        align="window", window_min=10, aggs={"temp_mean": "mean"}),
-    "steps":       dict(subdir="steps",       time="logDateTime", value="steps",
-                        align="window", window_min=10, aggs={"steps_sum": "sum"}),
-    "distance":    dict(subdir="steps",       time="logDateTime", value="distance",
-                        align="window", window_min=10, aggs={"distance_sum": "sum"}),
-    "spo2":        dict(subdir="spo2",        time="createdTime", value="spo2Value",
-                        align="asof", tolerance_min=360, out="spo2"),
-    # "sleep" is handled specially (interval membership) below.
+    "heartrate":   dict(subdir="heartrate",   time="logDateTime",  value="lastRate"),
+    "temperature": dict(subdir="temperature", time="createdTime",  value="temperature"),
+    "steps":       dict(subdir="steps",       time="logDateTime",  value="steps"),
+    "spo2":        dict(subdir="spo2",         time="createdTime",  value="spo2Value"),
 }
 SLEEP_SUBDIR = "sleep"
-SLEEP_EPOCH_MIN = 5               # each tilde-separated code spans 5 minutes
+SLEEP_EPOCH_MIN = 5               # each tilde-separated code spans 5 minutes (verified in data)
 
 
 # ==============================================================================
@@ -97,70 +92,46 @@ def _patient_dir(pid):
     raise FileNotFoundError(f"No raw folder for patient {pid} under {RAW_ROOT}")
 
 
-def _load_channel(pid, subdir, time_col, value_cols):
-    """Concatenate all Spark part-CSVs in a channel subfolder; parse + sort."""
+def _load_channel(pid, subdir, time_col, value_col):
+    """Concatenate all Spark part-CSVs in a channel subfolder; parse + sort by time."""
     d = _patient_dir(pid) / subdir
     parts = sorted(d.glob("part-*.csv"))
     if not parts:
         return None
     df = pd.concat([pd.read_csv(p) for p in parts], ignore_index=True)
     df.columns = df.columns.str.strip()
-    cols = [time_col] + [c for c in np.atleast_1d(value_cols) if c in df.columns]
-    df = df[[c for c in cols if c in df.columns]].copy()
+    if time_col not in df.columns or value_col not in df.columns:
+        return None
+    df = df[[time_col, value_col]].copy()
     df[time_col] = pd.to_datetime(df[time_col], errors="coerce")
-    for c in np.atleast_1d(value_cols):
-        if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors="coerce")
+    df[value_col] = pd.to_numeric(df[value_col], errors="coerce")
     return df.dropna(subset=[time_col]).sort_values(time_col).reset_index(drop=True)
 
 
 # ==============================================================================
-# ALIGNERS  (all strictly causal: window ends at, or asof is backward from, t)
+# ALIGNERS  (strictly causal: backward as-of from t)
 # ==============================================================================
-def align_window(grid_ns, ch_time, ch_val, window_min, aggs):
-    """Aggregate channel samples in the PRECEDING window (t-window, t] per grid t."""
-    ct = ch_time.values.astype("datetime64[ns]")
-    cv = ch_val.values.astype(float)
-    win = np.timedelta64(int(window_min * 60), "s")
-    lo = np.searchsorted(ct, grid_ns - win, side="right")
-    hi = np.searchsorted(ct, grid_ns, side="right")
-    out = {name: np.full(len(grid_ns), np.nan) for name in aggs}
-    fns = {"mean": np.mean, "min": np.min, "max": np.max, "sum": np.sum,
-           "median": np.median, "std": np.std, "count": len}
-    for i in range(len(grid_ns)):
-        a, b = lo[i], hi[i]
-        if b > a:
-            seg = cv[a:b]
-            seg = seg[np.isfinite(seg)]
-            if seg.size:
-                for name, how in aggs.items():
-                    out[name][i] = fns[how](seg)
-    return out
-
-
-def align_asof(master, ch, time_col, value_col, out_col, tolerance_min):
-    """Last known value as-of t (backward) within tolerance; plus its age (min)."""
-    left = master[["createdTime"]].sort_values("createdTime")
-    right = ch[[time_col, value_col]].rename(columns={time_col: "createdTime"}).sort_values("createdTime")
+def align_asof(grid, ch, time_col, value_col):
+    """Most recent recorded value at or before each grid timestamp, within tolerance.
+    Returns a Series aligned to `grid` (no aggregation; the original value is kept)."""
+    left = pd.DataFrame({"createdTime": grid}).sort_values("createdTime")
+    right = (ch[[time_col, value_col]]
+             .rename(columns={time_col: "createdTime"})
+             .sort_values("createdTime"))
     merged = pd.merge_asof(left, right, on="createdTime", direction="backward",
-                           tolerance=pd.Timedelta(minutes=tolerance_min))
-    merged = merged.rename(columns={value_col: out_col})
-    # staleness: minutes since the matched reading
-    age = pd.merge_asof(left, right.assign(_t=right["createdTime"]),
-                        on="createdTime", direction="backward",
-                        tolerance=pd.Timedelta(minutes=tolerance_min))["_t"]
-    merged[f"{out_col}_age_min"] = (merged["createdTime"] - age).dt.total_seconds() / 60.0
-    return merged.set_index("createdTime")[[out_col, f"{out_col}_age_min"]]
+                           tolerance=pd.Timedelta(minutes=ASOF_TOLERANCE_MIN))
+    return merged.set_index("createdTime")[value_col]
 
 
-def align_sleep(pid, grid_ns):
-    """is_asleep (inside a session interval) + the 5-min epoch stage code as-of t."""
+def align_sleep(pid, grid):
+    """The 5-minute sleep-stage code active at each grid timestamp (blank if no
+    session covers it). Writes the ACTUAL recorded code, nothing decoded."""
     d = _patient_dir(pid) / SLEEP_SUBDIR
     parts = sorted(d.glob("part-*.csv"))
-    is_asleep = np.zeros(len(grid_ns), int)
+    grid_ns = np.asarray(grid, dtype="datetime64[ns]")
     stage = np.full(len(grid_ns), np.nan)
     if not parts:
-        return is_asleep, stage
+        return stage
     sl = pd.concat([pd.read_csv(p) for p in parts], ignore_index=True)
     sl.columns = sl.columns.str.strip()
     sl["logDateTime"] = pd.to_datetime(sl["logDateTime"], errors="coerce")
@@ -172,15 +143,11 @@ def align_sleep(pid, grid_ns):
         lo = np.searchsorted(grid_ns, s, side="left")
         hi = np.searchsorted(grid_ns, e, side="right")
         if hi > lo:
-            is_asleep[lo:hi] = 1
-            # decode the per-epoch stage code active at each grid point in-session
-            codes = str(r.get("description", "")).split("~")
-            codes = [c for c in codes if c.strip() != ""]
+            codes = [c for c in str(r.get("description", "")).split("~") if c.strip() != ""]
             if codes:
-                offs = ((grid_ns[lo:hi] - s) / epoch).astype(int)
-                offs = np.clip(offs, 0, len(codes) - 1)
+                offs = np.clip(((grid_ns[lo:hi] - s) / epoch).astype(int), 0, len(codes) - 1)
                 stage[lo:hi] = [pd.to_numeric(codes[o], errors="coerce") for o in offs]
-    return is_asleep, stage
+    return stage
 
 
 # ==============================================================================
@@ -200,7 +167,7 @@ def cpd_columns(df, mode):
 # BUILD
 # ==============================================================================
 def build_patient_dataset(pid, smoothing_method, annotation_method, cpd_mode):
-    # 1) master spine = the annotated file (grid + smoothed + residual + CPD)
+    # 1) master spine = the annotated file (grid + raw/smoothed/residual HRV + CPD)
     annot = ANNOT_DIR / f"{pid}_{smoothing_method}_annotated.csv"
     if not annot.exists():
         raise FileNotFoundError(f"Annotated file not found: {annot} "
@@ -209,45 +176,29 @@ def build_patient_dataset(pid, smoothing_method, annotation_method, cpd_mode):
     master.columns = master.columns.str.strip()
     master["createdTime"] = pd.to_datetime(master["createdTime"])
     master = master.sort_values("createdTime").reset_index(drop=True)
-    grid_ns = master["createdTime"].values.astype("datetime64[ns]")
+    grid = master["createdTime"]
 
-    out = pd.DataFrame({"timestamp": master["createdTime"], "patient_id": pid})
-
-    # 2) HRV trio from the spine
-    out["raw_hrv"] = master["hrvValue"]
+    # 2) spine columns, original names
+    out = pd.DataFrame({"createdTime": grid, "patient_id": pid})
+    out["hrvValue"] = master["hrvValue"]
     out["smoothed_hrv"] = master["smoothed_hrv"]
     out["residual_hrv"] = master["residual_hrv"]
-    out["hrv_observed"] = master["hrvValue"].notna().astype(int)
 
-    # 3) raw channels (causal alignment per the registry)
+    # 3) raw channels — actual value placed at each timestamp (backward as-of)
     for name, cfg in RAW_CHANNELS.items():
         ch = _load_channel(pid, cfg["subdir"], cfg["time"], cfg["value"])
         if ch is None or ch.empty:
-            for col in (cfg.get("aggs", {}) or {cfg.get("out", name): None}):
-                out[col] = np.nan
-            continue
-        if cfg["align"] == "window":
-            agg = align_window(grid_ns, ch[cfg["time"]], ch[cfg["value"]],
-                               cfg["window_min"], cfg["aggs"])
-            for col, vals in agg.items():
-                out[col] = vals
-        elif cfg["align"] == "asof":
-            a = align_asof(master, ch, cfg["time"], cfg["value"], cfg["out"], cfg["tolerance_min"])
-            out = out.merge(a, left_on="timestamp", right_index=True, how="left")
+            out[cfg["value"]] = np.nan
+        else:
+            out[cfg["value"]] = align_asof(grid, ch, cfg["time"], cfg["value"]).values
 
-    # 4) sleep (special: interval membership + epoch stage)
-    is_asleep, sleep_stage = align_sleep(pid, grid_ns)
-    out["is_asleep"] = is_asleep
-    out["sleep_stage_code"] = sleep_stage
+    # 4) sleep stage code (actual 5-min code active at t)
+    out["sleep_stage"] = align_sleep(pid, grid)
 
-    # 5) calendar features (circadian phase)
-    minute_of_day = out["timestamp"].dt.hour * 60 + out["timestamp"].dt.minute
-    out["tod_sin"] = np.sin(2 * np.pi * minute_of_day / 1440.0)
-    out["tod_cos"] = np.cos(2 * np.pi * minute_of_day / 1440.0)
-    out["day_of_week"] = out["timestamp"].dt.dayofweek
-
-    # 6) segmentation + CPD annotations from the spine
-    for c in ("gap_flag", "chunk_id"):
+    # 5) segmentation + CPD annotations from the spine
+    #    candidate_event = Stage-03a post-gap "keep-but-verify" flag (present only if 03a ran);
+    #    carried unconditionally like gap_flag/chunk_id — it's a calibration flag, not a detector.
+    for c in ("gap_flag", "chunk_id", "candidate_event"):
         if c in master.columns:
             out[c] = master[c]
     for c in cpd_columns(master, cpd_mode):
@@ -264,13 +215,13 @@ def main():
     out_path = OUT_DIR / f"{PATIENT_ID}__sm-{SMOOTHING_METHOD}__model.csv"
     df.to_csv(out_path, index=False)
 
-    obs = df["hrv_observed"].sum()
+    obs = int(df["hrvValue"].notna().sum())
     print(f"\nRows: {len(df)}  ({obs} HRV-observed, {len(df) - obs} gap-filler)")
     print(f"Columns ({len(df.columns)}): {list(df.columns)}")
     print(f"\nNon-null counts:\n{df.notna().sum().to_string()}")
-    print(f"\nHead (observed rows):")
-    with pd.option_context("display.max_columns", None, "display.width", 200):
-        print(df[df.hrv_observed == 1].head(4).to_string(index=False))
+    print(f"\nHead (HRV-observed rows):")
+    with pd.option_context("display.max_columns", None, "display.width", 220):
+        print(df[df.hrvValue.notna()].head(4).to_string(index=False))
     print(f"\nWrote: {out_path.resolve()}")
 
 

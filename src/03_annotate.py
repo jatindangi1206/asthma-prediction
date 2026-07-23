@@ -90,7 +90,20 @@ def _ensure_chunk_id(df):
     return df
 
 
-def annotate_patient(file_path, out_dir, pop_sigma0=None):
+def _load_calibration(file_path, calib_dir):
+    """Stage-03a per-patient calibration, aligned to this file's grid by createdTime.
+    Returns None when 03a hasn't been run — caller then uses the inline burn-in."""
+    if calib_dir is None:
+        return None
+    cf = Path(calib_dir) / (file_path.stem + "_calib.csv")
+    if not cf.exists():
+        return None
+    c = pd.read_csv(cf)
+    c["createdTime"] = pd.to_datetime(c["createdTime"])
+    return c
+
+
+def annotate_patient(file_path, out_dir, pop_sigma0=None, calib_dir=None):
     try:
         df = pd.read_csv(file_path, encoding="utf-8-sig")
         df.columns = df.columns.str.strip()
@@ -104,31 +117,57 @@ def annotate_patient(file_path, out_dir, pop_sigma0=None):
 
         resid = pd.to_numeric(df["residual_hrv"], errors="coerce").to_numpy()
         observed = np.isfinite(resid)
-
-        # ---- Cold-start: cumulative 24h burn-in with a POPULATION PRIOR ---------
-        # Valid samples are counted across ALL chunks (MNAR gaps ignored). The
-        # patient's own burn-in estimate is shrunk toward a population prior via a
-        # pseudo-count N0 (Bayesian shrinkage), so the noise floor is robust even
-        # when few early samples exist; the patient's data dominates as it accrues.
         obs_idx = np.where(observed)[0]
         if obs_idx.size < 2:
             return {"file": file_path.name, "status": "failed", "reason": "no residuals"}
-        burn = resid[obs_idx[:BURN_IN_N]]                 # first 144 VALID samples (cross-chunk)
-        n = int(burn.size)
-        pop = float(pop_sigma0) if pop_sigma0 else POP_SIGMA0_DEFAULT
-        m_obs = float(np.median(burn))
-        sig_obs = float(max(1.4826 * np.median(np.abs(burn - m_obs)), np.std(burn), 1e-3))
-        # shrink variance toward the population prior; shrink mean toward 0 (residual baseline)
-        sigma0 = float(np.sqrt((POP_N0 * pop ** 2 + n * sig_obs ** 2) / (POP_N0 + n)))
-        m0 = float((POP_N0 * 0.0 + n * m_obs) / (POP_N0 + n))
-        priors = {"m0": m0, "sigma0": sigma0}
-
-        # armed[row] = observed AND it is past the first BURN_IN_N observed points
-        armed = np.zeros(len(df), bool)
-        if obs_idx.size > BURN_IN_N:
-            armed[obs_idx[BURN_IN_N:]] = True
 
         elapsed = (df["createdTime"] - df["createdTime"].iloc[0]).dt.total_seconds().to_numpy() / 60.0
+
+        calib = _load_calibration(file_path, calib_dir)
+        if calib is not None:
+            # ---- Track A': adaptive baseline + gap-aware arming from Stage 03a ----
+            # 03a emits exactly one calib row per smoothed row, from the same file with the
+            # same (stable) sort, so rows align POSITIONALLY. Merging on createdTime instead
+            # fans out on patients that carry duplicate timestamps (several do) and yields
+            # more rows than the frame -> broadcast error. Merge only as a fallback, and
+            # de-duplicate the key first so it cannot fan out.
+            if len(calib) != len(df):
+                calib = df[["createdTime"]].merge(
+                    calib.drop_duplicates(subset="createdTime"), on="createdTime", how="left")
+            if len(calib) != len(df):        # still mismatched -> refuse rather than corrupt
+                calib = None
+        if calib is not None:
+            armed = (calib["armed"].fillna(0).to_numpy() == 1)
+            seg = calib["calib_segment"].ffill().fillna(0).to_numpy().astype(int)
+            candidate = calib["candidate_event"].fillna(0).to_numpy().astype(int)
+            # per-segment priors (m0, sigma0) — constant within a segment, hence within a chunk
+            seg_priors = {int(s): {"m0": float(g["calib_m0"].iloc[0]),
+                                   "sigma0": float(g["calib_sigma0"].iloc[0])}
+                          for s, g in calib.groupby("calib_segment")}
+            pop = float(pop_sigma0) if pop_sigma0 else POP_SIGMA0_DEFAULT
+            default_priors = next(iter(seg_priors.values()), {"m0": 0.0, "sigma0": pop})
+
+            def priors_for_chunk(idx):
+                return seg_priors.get(int(seg[idx[0]]), default_priors)
+            log_sigma0 = float(default_priors["sigma0"])
+        else:
+            # ---- Fallback: 03's original cumulative 24h burn-in (population prior) ----
+            burn = resid[obs_idx[:BURN_IN_N]]             # first 144 VALID samples (cross-chunk)
+            n = int(burn.size)
+            pop = float(pop_sigma0) if pop_sigma0 else POP_SIGMA0_DEFAULT
+            m_obs = float(np.median(burn))
+            sig_obs = float(max(1.4826 * np.median(np.abs(burn - m_obs)), np.std(burn), 1e-3))
+            sigma0 = float(np.sqrt((POP_N0 * pop ** 2 + n * sig_obs ** 2) / (POP_N0 + n)))
+            m0 = float((POP_N0 * 0.0 + n * m_obs) / (POP_N0 + n))
+            _priors = {"m0": m0, "sigma0": sigma0}
+            candidate = np.zeros(len(df), int)
+            armed = np.zeros(len(df), bool)
+            if obs_idx.size > BURN_IN_N:
+                armed[obs_idx[BURN_IN_N:]] = True
+
+            def priors_for_chunk(idx):
+                return _priors
+            log_sigma0 = sigma0
 
         # ---- per-method, per-chunk detection on observed residuals --------------
         per = {name: {"anomaly": np.zeros(len(df), int),
@@ -143,8 +182,9 @@ def annotate_patient(file_path, out_dir, pop_sigma0=None):
                 continue
             t_chunk = elapsed[idx] - elapsed[idx[0]]
             v_chunk = resid[idx]
+            chunk_priors = priors_for_chunk(idx)
             for name, module in METHODS:
-                r = module.detect(t_chunk, v_chunk, priors)
+                r = module.detect(t_chunk, v_chunk, chunk_priors)
                 for k in ("anomaly", "phenotype", "magnitude", "severity"):
                     per[name][k][idx] = r[k]
 
@@ -178,6 +218,7 @@ def annotate_patient(file_path, out_dir, pop_sigma0=None):
         df["anomaly_present"] = anomly
         df["primary_phenotype"] = primary
         df["magnitude"] = mag
+        df["candidate_event"] = candidate      # post-gap keep-but-verify flag (0 in fallback mode)
         df["cpd_input_col"] = "residual_hrv"
 
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -192,7 +233,7 @@ def annotate_patient(file_path, out_dir, pop_sigma0=None):
 
         return {"file": file_path.name, "status": "success", "n_rows": len(df),
                 "n_armed": int(armed.sum()), "n_anomaly": int(anomly.sum()),
-                "ensemble_events": _events(anomly), "sigma0": round(sigma0, 3), **ev}
+                "ensemble_events": _events(anomly), "sigma0": round(log_sigma0, 3), **ev}
     except Exception as e:
         return {"file": file_path.name, "status": "failed", "reason": str(e)}
 
@@ -203,6 +244,7 @@ def run_annotation(method="gammadglm"):
         return
     in_dir = Path(SMOOTHERS[method][0])
     out_dir = Path(f"data/annotated_{method}")
+    calib_dir = Path(f"data/calibrated_{method}")       # Stage 03a output (optional)
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
     csv_files = sorted(in_dir.glob("*.csv"))
@@ -214,11 +256,14 @@ def run_annotation(method="gammadglm"):
     print(f"Input:    {in_dir.resolve()}")
     print(f"Output:   {out_dir.resolve()}")
     pop_sigma0 = _population_sigma0(csv_files)            # population prior (cohort-derived)
+    calib_on = calib_dir.exists() and any(calib_dir.glob("*_calib.csv"))
     print(f"Patients: {len(csv_files)}   Methods: {[m for m, _ in METHODS]}")
-    print(f"CPD input column: residual_hrv   Burn-in: {BURN_IN_N} valid pts (cumulative)   "
+    print(f"CPD input column: residual_hrv   "
+          f"Baseline: {'Stage-03a adaptive (' + str(calib_dir) + ')' if calib_on else f'inline {BURN_IN_N}-pt burn-in'}   "
           f"Pop prior σ0={pop_sigma0:.2f} (N0={POP_N0})   Vote: any-of-4\n")
 
-    results = [annotate_patient(f, out_dir, pop_sigma0) for f in tqdm(csv_files, desc="Annotating")]
+    results = [annotate_patient(f, out_dir, pop_sigma0, calib_dir if calib_on else None)
+               for f in tqdm(csv_files, desc="Annotating")]
     df_log = pd.DataFrame(results)
     df_log.to_csv(RESULTS_DIR / f"annotation_{method}_log.csv", index=False)
 

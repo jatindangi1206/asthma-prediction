@@ -46,7 +46,12 @@ MIN_EFFECT_Z = 10.0          # fire only if MMD >= this many null-std above null
 STUDENTIZE = True            # divide residual by a causal rolling std first
 STUD_HALFLIFE = 36           # ~6 h half-life for the rolling-std envelope
 PHENOTYPE = "KCPD_Distribution_Shift"
-_RNG = np.random.default_rng(0)
+RNG_SEED = 0                 # re-seeded PER detect() call — see below
+# NOTE: a module-level RNG made results depend on how many chunks/patients/methods
+# had already been processed in the same interpreter (the permutation stream kept
+# advancing), so annotating one patient alone disagreed with that same patient
+# inside a cohort run. The generator is now created inside detect(), making every
+# call order-independent and per-patient reproducible.
 
 
 def _rbf_gram(x, gamma):
@@ -89,6 +94,7 @@ def detect(time, values, priors=None):
 
     sig = _studentize(values, STUD_HALFLIFE) if STUDENTIZE else values
     idx2 = np.arange(2 * w)
+    rng = np.random.default_rng(RNG_SEED)      # fresh per call -> order-independent
 
     for t in range(2 * w, N + 1, STRIDE):
         block = sig[t - 2 * w:t]                          # past w | present w
@@ -100,7 +106,7 @@ def detect(time, values, priors=None):
 
         null = np.empty(N_PERM)
         for j in range(N_PERM):
-            p = _RNG.permutation(idx2)
+            p = rng.permutation(idx2)
             null[j] = _mmd2_from_K(K[np.ix_(p, p)], w)
         null_mean = null.mean(); null_std = null.std() + 1e-12
         z = (obs - null_mean) / null_std                  # effect size vs the null

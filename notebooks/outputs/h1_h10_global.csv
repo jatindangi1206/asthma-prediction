@@ -9,3 +9,17 @@ H7,Sampling regularity,median step 10.0 min; 95% steps ~10 min,REGULAR
 H8,Missingness (gaps),median 55.4% NaN gap-fill rows,PRESENT
 H9,Online operation,"system requirement, not a data property",N/A
 H10,Between-patient variability,SD of patient means 7.9 ms; median patient SD 32.5 ms,HIGH
+
+
+
+id,characteristic
+H1,Bounded & strictly positive
+H2,Bimodal value distribution
+H3,Power-law (1/f) spectrum
+H4,Non-stationary baseline
+H5,Circadian rhythm
+H6,Heavy-tailed noise
+H7,Sampling regularity
+H8,Missingness (gaps)
+H9,Online operation
+H10,Between-patient variability
