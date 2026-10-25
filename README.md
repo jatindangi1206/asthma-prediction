@@ -41,79 +41,97 @@ every smoother knob), reproducibility, and a contribution/PR guide.
 
 ---
 
-## 1. Architecture: the Dual-Track Residual pipeline
-
-Running change-point detection (CPD) on **raw** HRV fails (circadian rhythm +
-baseline drift cause false alarms); running CPD on **smoothed** HRV also fails
-(it erases the volatility bursts that signal an attack). We resolve this with the
-**Dual-Track Residual Architecture**:
+## 1. Architecture: five independent steps
 
 ```
- raw_data/<pid>/hrv/*.csv
-        │  00_preprocess_raw.py   (parse Spark CSVs; insert NaN fillers; 180-min rule)
-        ▼
- data/processed/<pid>_processed.csv
-        │
-        │            ┌──────────────── TRACK A (Context) ────────────────┐
-        ├──►  02x_run_<method>.py  ──►  smoothed_hrv   (expected baseline) │
-        │            │                                                    │
-        │            │                    residual_hrv = hrvValue − smoothed_hrv
-        │            │                                                    │
-        └──────────── TRACK B (Reality) = raw hrvValue ───────────────────┘
-        │
-        ▼  data/smoothed_<method>/<pid>_<method>.csv     (carries residual_hrv)
-        │
-        ▼  03_annotate.py <method>     (CPD ensemble runs ON residual_hrv,
-        │                               per-chunk reset, 24-h burn-in + pop prior)
-        ▼
- data/annotated_<method>/<pid>_<method>_annotated.csv   ← Rich Annotation Vector = ML target Y
-        │
-        ▼  (downstream, out of scope here) multi-task Transformer/SSM:
-           X = [smoothed_hrv, residual_hrv, steps, sleep, sin/cos(time_of_day)]
-           Y = {anomaly_present, primary_phenotype, magnitude}
+sources ─▶ ingest ─▶ smooth ──┐
+               │              ├─▶ join ─▶ model ─▶ evaluate
+               └─▶ detect ────┘
+                   (on raw, smoothed or residual)
 ```
 
-All methods obey a shared **H-Framework**: **H1** positivity, **H2/H4** drifting
-multimodal baseline, **H5** circadian rhythm, **H7** irregular sampling, **H8**
-≥180-min segmentation (state flush), **H9** strict causality (no peeking ahead),
-**H10** per-patient adaptation. A plain-language guide to each method is in
-`HRV_Smoothing_Methods_Explained.docx`.
+No step imports another. `wearable/experiment.py` is the only module that connects
+them, so each runs on its own and they compose in any order — or not at all: handing
+the raw signal straight to the model is one call.
+
+### The five rules the repo enforces
+
+`python -m wearable selftest` and `tests/test_smoke.py` assert all of these.
+
+1. **Steps do not depend on each other.** A test greps for cross-step imports.
+2. **Adding a method is one file, nothing else.** Pools are discovered from the
+   filesystem; there is no list to register in.
+3. **Every result records how it was made** — method, settings, input artifacts and
+   code version — in a `manifest.json` beside it, so any result traces back to the raw
+   signal (`python -m wearable lineage ...`).
+4. **The same computation is never run twice.** Artifacts are keyed on a content hash
+   of exactly those things; a matching key is reused. Editing one method's source
+   invalidates that method and nothing else.
+5. **A comparison varies only the method.** Same model, same seed, and the same test
+   participants — the split is derived from the patient universe and the seed alone,
+   never from feature content.
+
+### Signal choice: raw, smoothed, or residual
+
+CPD on **raw** HRV false-alarms on circadian rhythm and baseline drift. CPD on
+**smoothed** HRV erases the volatility bursts that signal an attack. The resolution is
+the residual:
+
+- a smoother produces `smoothed_hrv`, the expected baseline;
+- `residual_hrv = hrvValue − smoothed_hrv`.
+
+That rationale still stands, but the residual is now **one option of three**, not the
+architecture. `detect --on raw|smoothed|residual` picks the column, and
+`python -m wearable sweep signal` measures which actually wins. Some detectors work
+better on a raw signal and some on a de-trended one, so this is a parameter.
 
 ---
 
 ## 2. Repository layout
 
+Four pools, discovered from the filesystem. Drop a file in one and it is registered.
+
 ```
 asthma-prediction/
-├── README.md                         ← this manual
-├── CLAUDE.md                         ← state-space model spec / engineering notes
-├── HRV_Smoothing_Methods_Explained.docx
-├── requirements.txt                  ← pinned deps (Python 3.10)
-├── main.tex                          ← the paper
-├── raw_data/
-│   ├── "0010"/ hrv/ … heartrate/ sleep/ spo2/ steps/ temperature/
-│   └── processed_users.txt           ← quoted patient IDs to process
-├── src/
-│   ├── 00_preprocess_raw.py          ← Stage 0
-│   ├── 01_hyper_tuning.py            ← Stage 1 (optional, particle-filter N*,M*)
-│   ├── 02_run_filters.py             ┐
-│   ├── 02b…02k_run_*.py              ┘ Stage 2 orchestrators (11 smoothers, runnable)
-│   ├── <method>_smoother.py          ← 10 smoother libraries (smooth_dataframe + Config)
-│   ├── 03_annotate.py                ← Stage 3: CPD ensemble orchestrator
-│   ├── bocpd.py / kcp.py / kalman_cpd.py / hmm_cpd.py   ← 4 CPD detectors (detect())
-│   └── eda.py / eda_smoothed.py      ← diagnostics
-├── scripts/
-│   ├── smoother_comparison_report.py     ← 11-method evaluation report (registry-driven)
-│   ├── plot_annotated_interactive.py     ← per-patient residual + CPD interactive graph
-│   └── plot_<method>.py / visualize*.py
-└── data/
-    ├── processed/          <pid>_processed.csv          (Stage 0)
-    ├── smoothed/           <pid>_smoothed.csv           (Stage 2 — particle filter)
-    ├── smoothed_<method>/  <pid>_<method>.csv           (Stage 2b–2k, Track A + residual)
-    ├── annotated_<method>/ <pid>_<method>_annotated.csv (Stage 3, ML target Y)
-    ├── plots/              comparison + per-patient interactive HTML
-    └── results/            *_log.csv, hyperparameter_log.csv, eda/
+├── README.md  CLAUDE.md  requirements.txt  main.tex
+├── wearable/                    code: the package
+├── scripts/                     code: runnable reporting tools
+├── legacy/                      code: retired (see legacy/README.md)
+├── tests/                       code: tests
+├── docs/                        prose: method notes, the PDF and DOCX
+└── data/                        partitioned by LIFECYCLE, never committed
+    ├── raw/                     inputs, never written by the pipeline
+    │   ├── pass1/               labelled 221-patient cohort (has its own README)
+    │   └── spark/               older unlabelled export
+    ├── processed/               ingest output + labels_pass1.csv
+    ├── runs/<step>/<method>/<key>/   the artifact store — CURRENT results, each
+    │                            with its manifest.json provenance record
+    ├── reports/                 human-facing derived output (regenerable)
+    │   ├── eda/
+    │   ├── plots/
+    │   └── smoother_comparison/
+    ├── logs/                    per-step run logs (*_log.csv)
+    └── old/                     everything from previous runs (see its README);
+                                 never read by the pipeline
 ```
+
+### Naming rule
+
+Lowercase `snake_case` for every file and directory. Top-level directories are named by
+**kind** (code / prose / data); everything under `data/` is named by **lifecycle stage**,
+so a directory name tells you what stage produced it and whether it is current:
+`runs/` is current and provenance-tracked, `reports/` is regenerable, `old/` holds
+previous runs and is never read by the pipeline. Artifact files are `<pid>__<step>_<method>.<ext>` — no spaces, capitals,
+parentheses or plus signs.
+
+### How a method is registered
+
+A module in a pool directory is a method if it exposes the pool's entry point. Optional
+module attributes: `LABEL`, `DEFAULTS` (its knobs — these replaced the old `GLOBAL_*`
+constants), `CONFIG` (its dataclass), `KIND` and `HIGHER_IS_BETTER` (metrics). A module
+starting with `_`, or lacking the entry point, is skipped, so helpers can live
+alongside. A method that fails to import is reported unavailable rather than taking the
+registry down.
 
 ---
 
@@ -123,57 +141,73 @@ All commands run **from the `asthma-prediction/` directory**.
 
 ```bash
 # 0) environment
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
+python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt
+#    Use `.venv/bin/python` directly: `source .venv/bin/activate` does not always take
+#    in a non-interactive shell and falls back to a system python whose numpy is
+#    x86_64 (architecture ImportError on Apple Silicon).
 
-# 1) Stage 0 — preprocess (needs raw_data/processed_users.txt)
-python src/00_preprocess_raw.py
+python -m wearable list       # every discovered method and its defaults
+python -m wearable selftest   # assert the five rules; touches no data
 
-# 2) Stage 2 — Track A: run a smoother (pick one; run several to benchmark)
-python src/02b_run_rspf.py        # RS-PF       -> data/smoothed_rspf/
-python src/02g_run_gammadglm.py   # Gamma DGLM  -> data/smoothed_gammadglm/
-python src/02k_run_ctimm.py       # CT-IMM      -> data/smoothed_ctimm/
-#   (full list in §5)
+# 1) ingest — any registered source, one output contract
+python -m wearable ingest                    # default: the labelled pass1 cohort
+python -m wearable ingest --source spark     # the legacy unlabelled cohort
 
-# 3) Stage 3 — Track B: CPD ensemble on residual_hrv for a chosen Track A
-python src/03_annotate.py rspf    # -> data/annotated_rspf/
-#   method keys: pf rspf krlst gpssm ossa kim gammadglm logmhw hrkf anrewma  (ctimm via registry)
+# 2) run any step on its own
+python -m wearable smooth gammadglm [--deltrend 0.995] [--force]
+python -m wearable detect --on raw                       # CPD on the unsmoothed signal
+python -m wearable detect --on residual --smoothing gammadglm --methods bocpd,kcpd
 
-# 4) Evaluate smoothers side-by-side on one patient (standalone HTML report)
-python scripts/smoother_comparison_report.py 0010   # -> data/plots/smoother_comparison_0010.html
+# 3) join picks whatever results you already have, and does the split
+python -m wearable join --artifacts smooth:gammadglm,detect:bocpd --target detection
+python -m wearable model join:smooth:gammadglm --model logreg
+python -m wearable evaluate model:logreg
 
-# 5) Per-patient residual + CPD interactive graph
-python scripts/plot_annotated_interactive.py rspf 0010
+# 4) or chain them — any subset, including none
+python -m wearable chain --smoothing gammadglm --cpd bocpd,kcpd --on residual
+python -m wearable chain                     # no smoothing, no CPD: the raw baseline
+
+# 5) compare methods, everything else held fixed
+python -m wearable sweep smoothing           # every smoother + a no-smoothing baseline
+python -m wearable sweep cpd                 # every detector, same signal and model
+python -m wearable sweep signal              # one ensemble on raw vs smoothed vs residual
+python -m wearable sweep smoothers-no-model  # judge smoothers with no model at all
+#   add --limit 40 to cap patients for a fast sweep (it is part of the cache key)
+
+# 6) provenance
+python -m wearable runs                      # the artifact log
+python -m wearable lineage model:logreg      # back to the raw signal
 ```
 
-**Stop a run:** `Ctrl-C` (orchestrators use a process pool; partial per-patient
-outputs already written stay on disk). Background runs: `pkill -f 03_annotate.py`.
-Everything is **idempotent** — re-running overwrites per-patient outputs.
+**Reuse:** re-running anything with the same method, settings, input and code version
+prints `reusing <key>` and recomputes nothing. `--force` overrides.
+
+**Storage format** is a setting, not code: `WEARABLE_FORMAT=parquet python -m wearable ...`
+(or `config.STORE_FORMAT`). Adding a backend is one entry in `store._WRITERS`/`_READERS`.
+
+**Stop a run:** `Ctrl-C`; completed artifacts stay. An interrupted artifact is left
+`status: running` and is never reused, so a resumed run recomputes only it.
 
 ---
 
-## 4. Pipeline stages in detail
+## 4. The steps in detail
 
-| Stage | Script | Reads | Writes | Key constants |
-|---|---|---|---|---|
-| 0 Preprocess | `00_preprocess_raw.py` | `raw_data/`, `processed_users.txt` | `data/processed/` | `GAP_THRESHOLD_MIN=180`, `FILL_INTERVAL_MIN=10` |
-| 1 Tune (opt.) | `01_hyper_tuning.py` | `data/processed/` | `results/hyperparameter_log.csv` | particle `N*`, `M*` |
-| 2 Smooth | `02*_run_*.py` (×11) | `data/processed/` | `data/smoothed_<m>/` | per-method `GLOBAL_*` (§5) |
-| 3 Annotate | `03_annotate.py <m>` | `data/smoothed_<m>/` | `data/annotated_<m>/` | `BURN_IN_N=144`, `POP_N0=30`, detector consts (§6) |
-| Report | `smoother_comparison_report.py` | `data/processed/` (+`data/smoothed/` for PF) | `data/plots/` | registry (§10) |
+| Step | Input | Output table(s) | Notes |
+|---|---|---|---|
+| `ingest` | a registered source | `data/processed/<pid>_processed.csv`, `labels_pass1.csv` | the only step that still writes per-patient files; parallel |
+| `smooth` | ingest | `smoothed` | adds `residual_hrv`; H8 chunking, H1 positivity checked; parallel |
+| `detect` | ingest or a smooth artifact | `detected` | `--on raw/smoothed/residual`; per-chunk reset; 144-sample burn-in |
+| `join` | any artifacts + labels | `train`, `test`, `split` | day-level aggregation; patient-level split |
+| `model` | a join artifact | `predictions` | `p_id, date, y, y_prob` |
+| `evaluate` | predictions or a smooth artifact | `metrics` | picks model-based or signal-based metrics automatically |
 
-**Stage 0** parses the per-patient Spark-partition HRV CSVs, sorts by time, and
-inserts NaN-HRV filler rows every `FILL_INTERVAL_MIN` minutes across gaps larger
-than `GAP_THRESHOLD_MIN`, so downstream stages can *see* the voids without
-interpolating across them. Output columns: `createdTime, hrvValue, minute_diff`.
+`join` aggregates each input artifact to one row per patient-day: numeric columns become
+mean/std/min/max, and `*_anomaly` flags become both rows-flagged and **distinct events**
+(contiguous runs) — the honest count for a sustained-regime detector like the HMM.
 
-**Stage 2** (any of the 11 smoothers): keeps observed rows only, assigns
-`chunk_id` at every ≥180-min gap, filters each chunk independently with state
-reset (H8/H9), merges `smoothed_hrv` back onto the full grid, and computes
-`residual_hrv = hrvValue − smoothed_hrv`.
-
-**Stage 3** runs the four CPD detectors on `residual_hrv`, per chunk, after a
-24-h burn-in, and writes the Rich Annotation Vector (§6).
+Patients are split, never days: no patient appears in both train and test. The universe
+is every patient in the labels file, so a method that drops patients yields fewer rows
+but cannot shift the split.
 
 ---
 
@@ -303,24 +337,30 @@ it**. Constants are defined at the top of each file unless noted.
 ### 8.1 The 180-minute chunking (H8 segmentation)
 
 The chunker `assign_chunks()` splits a patient series wherever the gap between
-consecutive readings ≥ a threshold, and resets every model's state at the
-boundary. The threshold appears in **three places** that must stay consistent:
+consecutive readings ≥ a threshold, and resets every model's state at the boundary.
 
-| Where | Constant | Purpose |
-|---|---|---|
-| `src/00_preprocess_raw.py` | `GAP_THRESHOLD_MIN = 180` | where NaN fillers are inserted |
-| every `src/<method>_smoother.py` | `GAP_THRESHOLD_MIN = 180.0` (+ `gap_threshold_min` in each Config) | per-chunk smoothing reset |
-| `src/03_annotate.py` | `GAP_THRESHOLD_MIN = 180.0` | per-chunk CPD reset + `_ensure_chunk_id` |
+This constant used to be copied into **13 files** and the function into **10**. Both now
+have exactly one definition, and `tests/test_smoke.py` fails if a second appears:
 
-- **Change the threshold** (e.g. to 120 or 240 min): edit all three. Easiest: set
-  the value once and import it; or pass `gap_threshold_min=` into each Config.
-- **Change the chunking *strategy*** (not just the threshold): replace the body
-  of `assign_chunks()` (it is duplicated per smoother and in `03_annotate`). It
-  currently emits `chunk_id = (gap ≥ threshold).cumsum()`. Alternatives you can
-  drop in: **fixed-length windows** (`chunk_id = floor(elapsed_min / W)`),
-  **sleep/wake segmentation** (boundary at sleep-stage transitions from the
-  `sleep/` channel), or **activity-gated** (boundary when `steps` spikes). Keep
-  the contract: a monotone integer `chunk_id` per row, resetting per patient.
+| Where | What |
+|---|---|
+| `asthma/config.py` | `GAP_THRESHOLD_MIN = 180.0` — the only definition; everything imports it |
+| `asthma/chunking.py` | `assign_chunks()` — the only implementation; every smoother imports it |
+
+- **Change the threshold** (e.g. to 120 or 240 min): edit the one line in `config.py`.
+- **Change the chunking *strategy***: replace the body of `assign_chunks()` in
+  `chunking.py`. It currently emits `chunk_id = (gap ≥ threshold).cumsum()`.
+  Alternatives you can drop in: **fixed-length windows**
+  (`chunk_id = floor(elapsed_min / W)`), **sleep/wake segmentation** (boundary at
+  sleep-stage transitions from the `sleep_active` channel), or **activity-gated**
+  (boundary when `steps` spikes). Keep the contract: a monotone integer `chunk_id` per
+  row, resetting per patient. Note ids start at **1** — the first row's NaN gap counts
+  as a boundary.
+
+**One deliberate inconsistency, pinned by `selftest`:** ingest fills gaps on `> 180`
+while the chunker splits on `>= 180`, so a gap of exactly 180.000 min opens a new chunk
+but receives no filler row. Preserved from the original Stage 0 because changing it
+shifts every downstream output; the 10-min cadence makes it vanishingly rare.
 
 ### 8.2 The 24-hour burn-in / cold-start
 
@@ -363,7 +403,7 @@ Edit the constants in §6 at the top of each detector file:
 
 `src/00_preprocess_raw.py`: `FILL_INTERVAL_MIN = 10` (filler cadence — match your
 sampling rate), `GAP_THRESHOLD_MIN` (see §8.1). Which patients are processed is
-controlled by `raw_data/processed_users.txt`.
+controlled by `data/raw/spark/processed_users.txt`.
 
 ---
 
@@ -391,7 +431,7 @@ smoothed columns **plus**
 anomaly_present, primary_phenotype, magnitude, cpd_input_col(=residual_hrv)
 ```
 
-**Logs** (`data/results/`): `smoothing_<method>_log.csv` (per-patient status,
+**Logs** (`data/logs/`): `smoothing_<method>_log.csv` (per-patient status,
 `n_chunks`, `min_smoothed`), `annotation_<method>_log.csv` (per-patient
 `n_armed`, `n_anomaly`, per-method event counts, burn-in `sigma0`),
 `phase1_preprocess_log.csv`, `hyperparameter_log.csv`.
@@ -450,36 +490,45 @@ definitions are documented in-report; "roughness reduction" is stated neutrally
 
 ## 13. Contributing & PR guide
 
-### Add a new smoothing method (Track A)
-1. Create `src/<name>_smoother.py` exposing `smooth_dataframe(df, patient_col,
-   timestamp_col, value_col, config, out_col)` and an `@dataclass <Name>Config`.
-   It **must**: assign `chunk_id` (reuse `assign_chunks`), filter each chunk
-   independently with a fresh state (H8), be causal (H9), output positive values
-   (H1), derive per-patient params (H10), and add `residual_hrv`.
-2. Add a `__main__` self-test asserting H1 (min>0), H8 (chunk count), H9
-   (prefix==full truncation).
-3. Create `src/02x_run_<name>.py` (copy a sibling orchestrator; set `GLOBAL_*`,
-   output dir, file suffix; compute `residual_hrv`).
-4. Register it in `scripts/smoother_comparison_report.py` `REGISTRY` (one line)
-   and, if it feeds CPD, add it to `SMOOTHERS` in `src/03_annotate.py`.
-5. Tune `GLOBAL_*` on patient 0010's densest window; document the defaults.
+Every pool is discovered from the filesystem, so **an addition is one file**. There is
+no registry to edit and no orchestrator to copy.
 
-### Add a new CPD detector (Track B)
-1. Create `src/<name>_cpd.py` exposing `detect(time, values, priors) ->
-   {anomaly, phenotype, magnitude, severity}` (per-row arrays). Use
-   `priors["sigma0"]`; be causal; return native-unit `magnitude` and a [0,1]
-   `severity` for the ensemble argmax.
-2. Add `("<name>", module)` to `METHODS` in `src/03_annotate.py`; the per-method
-   columns and event counts wire up automatically.
-3. Add its phenotype colors to `scripts/plot_annotated_interactive.py`.
+| To add | Write one file | Entry point it must expose |
+|---|---|---|
+| a smoother | `wearable/smoothing/<name>.py` | `smooth_dataframe(df, patient_col, timestamp_col, value_col, config, out_col)` |
+| a detector | `wearable/cpd/<name>.py` | `detect(time, values, priors) -> {anomaly, phenotype, magnitude, severity}` |
+| a model | `wearable/models/<name>.py` | `fit(X, y, seed, **p)` and `predict_proba(fitted, X)` |
+| a metric | `wearable/metrics/<name>.py` | `compute(...)` plus `KIND = "model"` or `"signal"` |
+| a data format | a `patients()`/`load(pid)` pair in `wearable/sources.py` + one `Source(...)` | — |
 
-### Conventions & review checklist
-- Causality is non-negotiable for production methods (no future leakage). Any
-  backward/offline pass (FFBS, RTS smoother) must be labeled non-causal.
-- Keep the 180-min chunk reset and the per-patient calibration intact.
-- Prefer data-driven per-patient priors over hard-coded scales.
-- Update this README's parameter tables (§5/§6/§8) when adding constants.
-- Run the module self-tests and the comparison report before opening a PR.
+Declare `LABEL` and `DEFAULTS` (and `CONFIG` for a smoother) and they show up in
+`python -m wearable list`, in every sweep, and in the provenance manifest.
+
+### A smoother must
+- `from wearable.chunking import assign_chunks` — **never re-implement it**, and never
+  redefine `GAP_THRESHOLD_MIN`. Tests fail if a second definition appears.
+- filter each chunk independently with fresh state (H8), run causally (H9), emit a
+  strictly positive column (H1), and derive its parameters per patient (H10).
+- Check what `selftest` reports about its truncation behaviour. If it is
+  truncation-exact, add its key to `TRUNCATION_EXACT` in `wearable/selftest.py` so a
+  future regression is caught. If it is not, understand that it is fitting parameters
+  on data from the future — see §1 and the H9 note in `CLAUDE.md`.
+
+### A metric must
+- be one of the two kinds: `KIND = "model"` takes `(y_true, y_prob)`, `KIND = "signal"`
+  takes `(raw, smoothed)` and needs no model at all.
+- set `HIGHER_IS_BETTER` (default `True`) so comparison tables rank it correctly.
+- return `float("nan")` rather than raising when the input cannot support it (one
+  class present, too few points).
+
+### Review checklist
+- Never import one step from another; compose in `wearable/experiment.py`. A test
+  enforces this.
+- Anything that changes a result must be in the artifact key: add it to the step's
+  `params`, or results will be wrongly reused. The `--limit` flag is the worked example.
+- Prefer data-driven per-patient priors over hard-coded scales (H10).
+- Keep determinism: seed any RNG explicitly.
+- Run `python -m wearable selftest` before opening a PR.
 
 ---
 
@@ -514,4 +563,4 @@ West & Harrison (1997, DGLM); Aminikhanghahi & Cook (2017, CPD survey). Per-meth
 sources are in each module docstring and in `HRV_Smoothing_Methods_Explained.docx`.
 
 **License / data.** Research preview. HRV data is sensitive — do not commit
-`raw_data/` or any patient CSVs to a public remote.
+anything under `data/` to a public remote.

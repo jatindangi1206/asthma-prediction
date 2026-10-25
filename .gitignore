@@ -1,48 +1,22 @@
 __pycache__/
+*.pyc
 .venv/
 venv/
-*.pyc
+*.zip
 
-raw_data.zip
-
-# Raw wearable data — bulky, contains all participants.
-# Ignore everything except participant 0010 (folder name includes literal quotes).
-/raw_data/*
-!/raw_data/"0010"/
-!/raw_data/processed_users.txt
-
-# Pipeline outputs: ignore everything under data/ ...
-/data/*
-
-# ... but keep participant 0010's data and plots only.
-# (each level must be re-included before the file inside it)
-!/data/processed/
-/data/processed/*
-!/data/processed/0010_processed.csv
-
-!/data/smoothed/
-/data/smoothed/*
-!/data/smoothed/0010_smoothed.csv
-
-!/data/annotated/
-/data/annotated/*
-!/data/annotated/0010_annotated.csv
-
-!/data/plots/
-/data/plots/*
-!/data/plots/0010_*.png
-
-# EDA results: keep only participant 0010 and global summary figures,
-# plus the two JSON/CSV summary files. Ignore all other per-patient PNGs.
-!/data/results/
-/data/results/*
-!/data/results/eda_smoothed/
-/data/results/eda_smoothed/*
-!/data/results/eda_smoothed/0010_eda.png
-!/data/results/eda_smoothed/global_eda.png
-!/data/results/eda_smoothed/all_patients_summary.csv
-!/data/results/eda_smoothed/hrv_characteristics_post_smoothing.json
-
-
-
-!/data/modeling/
+# ---------------------------------------------------------------------------
+# data/ is never committed: patient HRV and clinical exacerbation records.
+#
+#   raw/pass1/   the input cohort (221 patients) — sensitive
+#   processed/   ingest output + labels_pass1.csv — sensitive
+#   runs/        the artifact store (current results + provenance)
+#   reports/     regenerable figures and HTML
+#   logs/        per-step run logs
+#   old/         everything from previous runs (see data/old/README.md)
+#
+# There is deliberately NO demo-patient allowlist. The previous one kept patient
+# 0010, who came from the retired spark export, so it cannot survive the reset to
+# pass1. After the fresh run, pick a pass1 patient and allowlist it here if you want
+# the repo to carry a runnable example — note that any such file is real patient data.
+# ---------------------------------------------------------------------------
+/data/

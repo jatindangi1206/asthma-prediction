@@ -8,10 +8,10 @@ stack of raw-vs-smoothed charts (one per method).
 MODULAR DESIGN
 --------------
 To add a newly implemented smoother to the report, add ONE entry to REGISTRY
-below. Each entry names the module (in src/), its `smooth_dataframe` API, a
+below, derived from wearable.smoothing.REGISTRY — its `smooth_dataframe` API, a
 config instance, and a short parameter string. Nothing else needs to change.
 
-Usage (from asthma-prediction/):
+Usage (from wearable-prediction/):
     python scripts/smoother_comparison_report.py [patient_id]   # default 0010
 """
 import sys
@@ -20,49 +20,29 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from scipy.signal import find_peaks
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-SRC = Path(__file__).resolve().parent.parent / "src"
-sys.path.insert(0, str(SRC))
-PROCESSED = Path("data/processed")
-OUT_DIR = Path("data/plots")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from wearable import metrics as metric_pool                      # noqa: E402
+from wearable import smoothing                                   # noqa: E402
+from wearable.config import PROCESSED_DIR, smoothed_dir          # noqa: E402
 
-# ==============================================================================
-# SMOOTHER REGISTRY  — add a new method here and it appears in the report.
-#   key      : short id
-#   name     : display name
-#   module   : module in src/ exposing smooth_dataframe(...) + a Config class
-#   config   : "(ConfigClass, dict-of-overrides)"  (None -> module defaults)
-#   params   : short human-readable parameter string (shown in the report)
-#   enabled  : include in the run
-# ==============================================================================
+PROCESSED = PROCESSED_DIR
+OUT_DIR = Path("data/reports/smoother_comparison")
+
+# Built from the one smoother registry — a method registered in
+# wearable/smoothing/__init__.py appears in this report with no edit here. The
+# parameter string shown in the report is just that method's registry defaults.
 REGISTRY = [
-    dict(key="rspf",      name="RS-PF (Regime-Switching Particle Filter)",
-         module="rspf_smoother",   cfg="RSPFConfig",     params="K=3 regimes, N=500 particles", enabled=True),
-    dict(key="krlst",     name="KRLS-T (Kernel RLS Tracker)",
-         module="krlst_smoother",  cfg="KRLSTConfig",    params="lengthscale=60min, c=5, λ=0.995, budget=100", enabled=True),
-    dict(key="gpssm",     name="State-Space GP (Markovian GP)",
-         module="gpssm_smoother",  cfg="GPSSMConfig",    params="q_scale=0.05, r_scale=5.0 (GP-learned F)", enabled=True),
-    dict(key="ossa",      name="OSSA (Online Singular Spectrum Analysis)",
-         module="ossa_smoother",   cfg="OSSAConfig",     params="window=144, n_components=2", enabled=True),
-    dict(key="kim",       name="Kim Filter (Markov-switching SSM)",
-         module="kim_smoother",    cfg="KimConfig",      params="2 regimes, q_scale=0.1, r_scale=3.0", enabled=True),
-    dict(key="gammadglm", name="Gamma CD-DGLM",
-         module="gamma_dglm",      cfg="GammaDGLMConfig",params="deltrend=0.99, delseas=0.99, shape data-driven", enabled=True),
-    dict(key="logmhw",    name="Log-MHW (Log Multiplicative Holt-Winters)",
-         module="logmhw_smoother", cfg="LogMHWConfig",   params="α=0.08, γ=0.02 (statsmodels-optimised α/β/φ)", enabled=True),
-    dict(key="hrkf",      name="H-RKF (Huber Robust Kalman, log-domain)",
-         module="hrkf_smoother",   cfg="HRKFConfig",     params="deltrend=0.99, huber_δ=1.345", enabled=True),
-    dict(key="anrewma",   name="AN-REWMA (Adaptive Norm + Robust EWMA)",
-         module="anrewma_smoother",cfg="ANREWMAConfig",  params="norm_α=0.05, IMQ c=1.0", enabled=True),
-    dict(key="ctimm",     name="CT-IMM (Continuous-Time Interacting Multiple Model)",
-         module="ct_imm_smoother", cfg="CTIMMConfig",     params="3 modes (calm/normal/volatile), q_scale=0.001, sticky=0.95", enabled=True),
-    # Original SMC particle filter (FFBS) — NON-CAUSAL and slow. Different API, so
-    # it is read from its precomputed output rather than re-run inside the report.
-    dict(key="pf",        name="Particle Filter (SMC + FFBS) — non-causal, offline",
-         source="precomputed", file_tmpl="data/smoothed/{pid}_smoothed.csv",
+    dict(key=key, name=f"{spec.label} ({key})",
+         params=", ".join(f"{k}={v}" for k, v in spec.defaults.items()), enabled=True)
+    for key, spec in smoothing.all_methods().items()
+] + [
+    # The original SMC particle filter (FFBS) is NON-CAUSAL and slow, and has a
+    # different API, so it is read from its precomputed output rather than re-run.
+    dict(key="pf", name="Particle Filter (SMC + FFBS) — non-causal, offline",
+         source="precomputed", file_tmpl=f"{smoothed_dir('pf')}/{{pid}}_smoothed.csv",
          params="N=250 particles, M=50 FFBS paths (precomputed)", enabled=True),
 ]
 
@@ -83,13 +63,13 @@ def load_patient(pid):
 
 def run_smoother(entry, obs):
     """Run one registered smoother on the observed rows; return (smoothed_series, info)."""
-    mod = __import__(entry["module"])
-    Cfg = getattr(mod, entry["cfg"])
-    cfg = Cfg()
+    # Go through the registry so the report runs the method with exactly the pipeline's
+    # configured knobs, not a bare Config().
+    spec = smoothing.method(entry["key"])
     t0 = time.perf_counter()
-    out = mod.smooth_dataframe(obs.copy(), patient_col="patient_id",
-                               timestamp_col="createdTime", value_col="hrvValue",
-                               config=cfg, out_col="smoothed_hrv")
+    out = spec.entry()(obs.copy(), patient_col="patient_id",
+                           timestamp_col="createdTime", value_col="hrvValue",
+                           config=spec.config(), out_col="smoothed_hrv")
     runtime = time.perf_counter() - t0
     out = out.sort_values("createdTime").reset_index(drop=True)
     n_chunks = int(out["chunk_id"].nunique()) if "chunk_id" in out else np.nan
@@ -99,37 +79,21 @@ def run_smoother(entry, obs):
 # ==============================================================================
 # METRICS
 # ==============================================================================
-def peak_preservation(raw, sm, win=6):
-    """Fraction of each raw peak's local excursion retained in the smoothed signal."""
-    pk, _ = find_peaks(raw, prominence=0.5 * np.nanstd(raw))
-    if pk.size == 0:
-        return np.nan
-    ratios = []
-    n = len(raw)
-    for p in pk:
-        a, b = max(0, p - win), min(n, p + win + 1)
-        raw_exc = raw[p] - np.min(raw[a:b])
-        sm_exc = sm[p] - np.min(sm[a:b])
-        if raw_exc > 1e-9:
-            ratios.append(np.clip(sm_exc / raw_exc, 0, 1))
-    return float(np.median(ratios)) if ratios else np.nan
-
-
 def metrics(raw_full, sm_full):
-    """Compute comparison metrics on rows where both raw and smoothed exist."""
+    """Every signal metric in wearable/metrics/, keyed by metric name.
+
+    ponytail: the formulas used to live here as well as in the pool. One definition —
+    add a metric file and this report gains a column with no edit.
+    """
+    out = {}
+    for name in metric_pool.names("signal"):
+        try:
+            out[name] = float(metric_pool.metric(name).load().compute(raw_full, sm_full))
+        except Exception:
+            out[name] = float("nan")
     m = np.isfinite(raw_full) & np.isfinite(sm_full)
-    raw, sm = raw_full[m], sm_full[m]
-    if raw.size < 3:
-        return None
-    var_red = 100.0 * (1 - np.var(sm) / np.var(raw)) if np.var(raw) > 0 else np.nan
-    rough_raw = np.mean(np.abs(np.diff(raw)))
-    rough_red = 100.0 * (1 - np.mean(np.abs(np.diff(sm))) / rough_raw) if rough_raw > 0 else np.nan
-    mean_err = abs(np.mean(sm) - np.mean(raw))
-    mean_err_pct = 100.0 * mean_err / abs(np.mean(raw)) if np.mean(raw) != 0 else np.nan
-    corr = float(np.corrcoef(raw, sm)[0, 1]) if raw.size > 1 else np.nan
-    return dict(var_red=var_red, rough_red=rough_red, mean_err=mean_err,
-                mean_err_pct=mean_err_pct, peak=peak_preservation(raw, sm),
-                corr=corr, n_used=int(raw.size))
+    out["n_used"] = int(m.sum())
+    return out if out["n_used"] >= 3 else None
 
 
 # ==============================================================================
@@ -166,8 +130,8 @@ def build_report(pid):
             rows.append(dict(name=e["name"], params=e["params"], runtime=runtime,
                              n_chunks=n_chunks, n_after=n_after, **(mt or {})))
             series.append((e["name"], e["params"], runtime, sm_full, mt, n_after))
-            print(f"  {e['key']:9s} ok  {runtime:5.1f}s  var_red={mt['var_red']:.0f}%  "
-                  f"rough_red={mt['rough_red']:.0f}%  peak={mt['peak']:.2f}")
+            print(f"  {e['key']:9s} ok  {runtime:5.1f}s  var_red={mt['variance_reduction']:.0f}%  "
+                  f"rough_red={mt['roughness_reduction']:.0f}%  peak={mt['peak_preservation']:.2f}")
         except Exception as ex:
             print(f"  {e['key']:9s} FAILED: {ex}")
             rows.append(dict(name=e["name"], params=e["params"], runtime=np.nan,
@@ -185,8 +149,8 @@ def build_report(pid):
             continue
         trs.append("<tr>" + "".join(f"<td>{c}</td>" for c in [
             f"<b>{r['name']}</b><br><span style='color:#777;font-size:11px'>{r['params']}</span>",
-            fmt(r['runtime'], "{:.2f}"), fmt(r['var_red']), fmt(r['rough_red']),
-            fmt(r['mean_err_pct']), fmt(r['peak'], "{:.2f}"), fmt(r['corr'], "{:.2f}"),
+            fmt(r['runtime'], "{:.2f}"), fmt(r['variance_reduction']), fmt(r['roughness_reduction']),
+            fmt(r['mean_error_pct']), fmt(r['peak_preservation'], "{:.2f}"), fmt(r['correlation'], "{:.2f}"),
             fmt(r.get('n_chunks'), "{:.0f}"), f"{n_obs}→{r['n_after']}"]) + "</tr>")
     defs_html = (
         "<h3 style='font-family:Arial;margin-top:26px'>What each column means</h3>"
@@ -222,7 +186,7 @@ def build_report(pid):
         "(<code>smoothed_hrv</code>). The raw signal is <b>Track B</b>. Their difference, computed on every "
         "observed row, is the <b>residual</b>: &nbsp;"
         "<code>residual_hrv = hrvValue − smoothed_hrv</code>. "
-        "It is written as the <code>residual_hrv</code> column in each <code>data/smoothed_&lt;method&gt;/</code> "
+        "It is written as the <code>residual_hrv</code> column in each <code>the smooth artifact's table</code> "
         "file and is the signal the change-point detectors operate on downstream. It is not a column in the "
         "table above; rather, the columns above (variance ↓, roughness ↓, peak score, corr) describe what Track A "
         "removes versus keeps — which is exactly what determines the contents of the residual.</p>")
