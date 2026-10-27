@@ -19,4 +19,17 @@ venv/
 # pass1. After the fresh run, pick a pass1 patient and allowlist it here if you want
 # the repo to carry a runnable example — note that any such file is real patient data.
 # ---------------------------------------------------------------------------
-/data/
+/data/*
+# Exception: cohort-level smoothing results only (no patient ids, no readings).
+# The dashboard, patient_stats.json and metrics_per_patient.csv stay out — they are per-patient.
+!/data/reports/
+/data/reports/*
+!/data/reports/smoothing/
+/data/reports/smoothing/*
+!/data/reports/smoothing/cohort_stats.json
+!/data/reports/smoothing/ideal_reference.json
+!/data/reports/smoothing/methods.html
+!/data/reports/smoothing/metrics_summary.csv
+!/data/reports/smoothing/runs.csv
+!/data/reports/smoothing/settings.csv
+!/data/reports/smoothing/settings.json

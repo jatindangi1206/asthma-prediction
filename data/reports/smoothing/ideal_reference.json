@@ -1,0 +1,35 @@
+{
+ "aiims": {
+  "noise_share_raw_pct": 30.34735371341749,
+  "ideal": {
+   "correlation": 0.9159971114691692,
+   "mean_error_pct": 0.008081145290358945,
+   "peak_preservation": 0.4088195250245744,
+   "roughness_reduction": 67.46978002204807,
+   "variance_reduction": 41.32229169408621,
+   "true_level_corr": 0.8345816094701735
+  }
+ },
+ "copd": {
+  "noise_share_raw_pct": 32.04562848693225,
+  "ideal": {
+   "correlation": 0.9289213675034796,
+   "mean_error_pct": 0.008533897066633865,
+   "peak_preservation": 0.4765173434593866,
+   "roughness_reduction": 60.62899704541709,
+   "variance_reduction": 46.160031450694106,
+   "true_level_corr": 0.8243444153572447
+  }
+ },
+ "combined": {
+  "noise_share_raw_pct": 30.172883841640914,
+  "ideal": {
+   "correlation": 0.9187734111990036,
+   "mean_error_pct": 0.00810422387753922,
+   "peak_preservation": 0.4208517582678523,
+   "roughness_reduction": 66.36530603201912,
+   "variance_reduction": 41.464530336067305,
+   "true_level_corr": 0.8356262092488429
+  }
+ }
+}

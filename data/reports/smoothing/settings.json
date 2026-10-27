@@ -1,0 +1,2168 @@
+{
+ "aiims": {
+  "anrewma": [
+   {
+    "knob": "gap_threshold_min",
+    "value": 180.0,
+    "kind": "pipeline",
+    "meaning": "A gap at least this long splits the recording; the filter restarts.",
+    "effect": "Higher: smooths across longer voids. Lower: more, shorter segments.",
+    "how": "Shared H8 constant. In this cohort 99% of gaps inside a segment are <= 120 min and the gap histogram has no natural break, so the data do not argue for moving it."
+   },
+   {
+    "knob": "min_segment_rows",
+    "value": 10,
+    "kind": "pipeline",
+    "meaning": "Segments with fewer readings are left unsmoothed.",
+    "effect": "Higher: fewer, more reliable estimates. Lower: smooths tiny fragments.",
+    "how": "Shared constant. 94.9% of readings sit in segments of >= 10."
+   },
+   {
+    "knob": "ref_dt_min",
+    "value": 10.0,
+    "kind": "derived",
+    "meaning": "Reference sampling step; elapsed time is measured in these units.",
+    "effect": "Must equal the real cadence, otherwise every rate is mis-scaled.",
+    "how": "Median gap between readings inside a segment = 10 min."
+   },
+   {
+    "knob": "norm_alpha",
+    "value": 0.00975,
+    "kind": "derived",
+    "meaning": "EWMA rate of the running mean/std used to normalise (the slow baseline).",
+    "effect": "Higher: normaliser follows faster drift. Lower: steadier baseline.",
+    "how": "1 - exp(-dt / tau_day), tau_day = 1021 min from the day-to-day correlation of daily medians (r = 0.244, 13121 day pairs)."
+   },
+   {
+    "knob": "ewma_r",
+    "value": 0.3035,
+    "kind": "derived",
+    "meaning": "Measurement noise of the robust EWMA, in normalised (z) units.",
+    "effect": "Higher (vs ewma_q): smoother output.",
+    "how": "Noise share of the variance: R/(R+S) = 299/(299+686) (raw HRV units)."
+   },
+   {
+    "knob": "ewma_q",
+    "value": 0.08818,
+    "kind": "derived",
+    "meaning": "Process noise per reading of the robust EWMA (z units).",
+    "effect": "Higher (vs ewma_r): follows the signal more closely.",
+    "how": "Level change per reading 2S(1-e^(-dt/tau)) / (R+S), tau = 153 min."
+   },
+   {
+    "knob": "ewma_c",
+    "value": 1.0,
+    "kind": "convention",
+    "meaning": "Soft outlier threshold of the IMQ weight, in z units.",
+    "effect": "Lower: more readings treated as outliers and ignored.",
+    "how": "WoLF default (Duran-Martin et al. 2024): c = 1."
+   },
+   {
+    "knob": "winsor",
+    "value": 3.0,
+    "kind": "convention",
+    "meaning": "|z| clip when updating the normaliser.",
+    "effect": "Lower: more robust normaliser.",
+    "how": "3 sigma rule."
+   },
+   {
+    "knob": "norm_init_window",
+    "value": 20,
+    "kind": "numerical",
+    "meaning": "Readings used to start the normaliser in each segment.",
+    "effect": "Higher: steadier start. Note: the start uses up to 20 readings ahead.",
+    "how": "Kept. Half of all segments are shorter than this, so it mostly equals the segment."
+   },
+   {
+    "knob": "sigma_floor_frac",
+    "value": 0.05,
+    "kind": "numerical",
+    "meaning": "Floor on the normaliser std.",
+    "effect": "Guard only.",
+    "how": "Kept."
+   }
+  ],
+  "ctimm": [
+   {
+    "knob": "gap_threshold_min",
+    "value": 180.0,
+    "kind": "pipeline",
+    "meaning": "A gap at least this long splits the recording; the filter restarts.",
+    "effect": "Higher: smooths across longer voids. Lower: more, shorter segments.",
+    "how": "Shared H8 constant. In this cohort 99% of gaps inside a segment are <= 120 min and the gap histogram has no natural break, so the data do not argue for moving it."
+   },
+   {
+    "knob": "min_segment_rows",
+    "value": 10,
+    "kind": "pipeline",
+    "meaning": "Segments with fewer readings are left unsmoothed.",
+    "effect": "Higher: fewer, more reliable estimates. Lower: smooths tiny fragments.",
+    "how": "Shared constant. 94.9% of readings sit in segments of >= 10."
+   },
+   {
+    "knob": "r_scale",
+    "value": 0.984,
+    "kind": "derived",
+    "meaning": "Multiplies the method's own noise estimate (MAD of differences).",
+    "effect": "Higher: smoother.",
+    "how": "Median per patient of variogram noise R / the method's MAD noise, so the noise it assumes equals the white noise actually measured."
+   },
+   {
+    "knob": "q_scale",
+    "value": 0.03434,
+    "kind": "derived",
+    "meaning": "Level process noise per minute, as a multiple of the noise R.",
+    "effect": "Higher: follows the signal more closely. Lower: smoother.",
+    "how": "(q per reading / dt) / R = (0.0158/10)/0.0459."
+   },
+   {
+    "knob": "mode_mults",
+    "value": [
+     0.09096,
+     1.0,
+     4.606
+    ],
+    "kind": "derived",
+    "meaning": "Calm / normal / volatile modes: process-noise multipliers.",
+    "effect": "Wider spread: adapts stiffness over a wider range.",
+    "how": "10th, 50th and 90th percentile of hourly noise level across 97372 patient-hours, divided by the median."
+   },
+   {
+    "knob": "stickiness",
+    "value": 0.8101,
+    "kind": "derived",
+    "meaning": "Probability of staying in the same mode at the next reading.",
+    "effect": "Higher: modes persist longer.",
+    "how": "exp(-dt / tau_vol), tau_vol = 47 min: how long an hourly noise level stays correlated."
+   },
+   {
+    "knob": "ref_dt_min",
+    "value": 10.0,
+    "kind": "numerical",
+    "meaning": "Declared but not used by the code (time enters in minutes).",
+    "effect": "None.",
+    "how": "-"
+   }
+  ],
+  "gammadglm": [
+   {
+    "knob": "gap_threshold_min",
+    "value": 180.0,
+    "kind": "pipeline",
+    "meaning": "A gap at least this long splits the recording; the filter restarts.",
+    "effect": "Higher: smooths across longer voids. Lower: more, shorter segments.",
+    "how": "Shared H8 constant. In this cohort 99% of gaps inside a segment are <= 120 min and the gap histogram has no natural break, so the data do not argue for moving it."
+   },
+   {
+    "knob": "min_segment_rows",
+    "value": 10,
+    "kind": "pipeline",
+    "meaning": "Segments with fewer readings are left unsmoothed.",
+    "effect": "Higher: fewer, more reliable estimates. Lower: smooths tiny fragments.",
+    "how": "Shared constant. 94.9% of readings sit in segments of >= 10."
+   },
+   {
+    "knob": "ref_dt_min",
+    "value": 10.0,
+    "kind": "derived",
+    "meaning": "Reference sampling step; elapsed time is measured in these units.",
+    "effect": "Must equal the real cadence, otherwise every rate is mis-scaled.",
+    "how": "Median gap between readings inside a segment = 10 min."
+   },
+   {
+    "knob": "n_harmonics",
+    "value": 3,
+    "kind": "derived",
+    "meaning": "Number of 24 h Fourier harmonics in the circadian term.",
+    "effect": "More: sharper daily shape, more parameters to learn per segment.",
+    "how": "Harmonic h kept if significant (p<0.05, autocorrelation-corrected F test) in >= 50% of patients: share significant {'1': 0.87, '2': 0.79, '3': 0.72}; 1-3 tested."
+   },
+   {
+    "knob": "period_min",
+    "value": 1440.0,
+    "kind": "physiology",
+    "meaning": "Length of the circadian cycle.",
+    "effect": "Fixed by biology.",
+    "how": "24 h."
+   },
+   {
+    "knob": "deltrend",
+    "value": 0.5611,
+    "kind": "derived",
+    "meaning": "Discount on the level: how much past information is kept per step.",
+    "effect": "Closer to 1: stiffer, smoother level. Lower: follows changes faster.",
+    "how": "1 - A, A = steady-state gain for signal-to-noise q/R = 0.343 (level change per reading q = 2S(1-e^(-dt/tau)) = 0.0158, noise R = 0.0459, S = 0.133, tau = 164 min, log units)."
+   },
+   {
+    "knob": "delseas",
+    "value": 1.0,
+    "kind": "derived",
+    "meaning": "Discount on the circadian harmonics: how fast the daily shape may change.",
+    "effect": "1: shape fixed once learned. Lower: shape adapts within the day.",
+    "how": "1 - A for r = (day-to-day change of the harmonic coefficients / readings per day) / R = 0. Day-to-day change beyond estimation noise: 0/day (0 = not detectable)."
+   },
+   {
+    "knob": "shape_scale",
+    "value": 0.8611,
+    "kind": "derived",
+    "meaning": "Multiplies the Gamma shape the method calibrates per patient (shape = observation precision).",
+    "effect": "Higher: readings trusted more -> follows them closely. Lower: smoother.",
+    "how": "For Gamma noise Var(log y) ~ 1/shape, so the right shape is 1/R. Median per patient of (1/R) / the method's own shape (median^2 / MAD-noise)."
+   },
+   {
+    "knob": "C0_var",
+    "value": 0.1333,
+    "kind": "derived",
+    "meaning": "Prior variance of the level at the start of each segment.",
+    "effect": "Higher: the first readings of a segment move the level more.",
+    "how": "The level's own variance S = 0.133 (log): how far it can be from the patient's median."
+   },
+   {
+    "knob": "C0_seas_var",
+    "value": [
+     0.01093,
+     0.005902,
+     0.001938
+    ],
+    "kind": "derived",
+    "meaning": "Prior variance of each circadian harmonic's two coefficients, per segment.",
+    "effect": "Higher: short segments can invent a large daily rhythm. The old value 1 let level and harmonics swing against each other (28% of outputs hit the range limits).",
+    "how": "amplitude^2 / 2 per harmonic (cos and sin share the amplitude), amplitudes 0.148 / 0.109 / 0.0623 (cohort median, log)."
+   },
+   {
+    "knob": "q_floor / q_cap",
+    "value": [
+     1e-06,
+     5.0
+    ],
+    "kind": "numerical",
+    "meaning": "Bounds on the linear-predictor variance.",
+    "effect": "Guards only.",
+    "how": "Kept."
+   }
+  ],
+  "gpssm": [
+   {
+    "knob": "gap_threshold_min",
+    "value": 180.0,
+    "kind": "pipeline",
+    "meaning": "A gap at least this long splits the recording; the filter restarts.",
+    "effect": "Higher: smooths across longer voids. Lower: more, shorter segments.",
+    "how": "Shared H8 constant. In this cohort 99% of gaps inside a segment are <= 120 min and the gap histogram has no natural break, so the data do not argue for moving it."
+   },
+   {
+    "knob": "min_segment_rows",
+    "value": 10,
+    "kind": "pipeline",
+    "meaning": "Segments with fewer readings are left unsmoothed.",
+    "effect": "Higher: fewer, more reliable estimates. Lower: smooths tiny fragments.",
+    "how": "Shared constant. 94.9% of readings sit in segments of >= 10."
+   },
+   {
+    "knob": "r_scale",
+    "value": 1.001,
+    "kind": "derived",
+    "meaning": "Multiplies the method's own noise estimate.",
+    "effect": "Higher: smoother.",
+    "how": "Median per patient of variogram noise R / the method's MAD noise."
+   },
+   {
+    "knob": "q_scale",
+    "value": 0.8652,
+    "kind": "derived",
+    "meaning": "Multiplies the method's own process-noise estimate.",
+    "effect": "Higher: follows the signal more closely.",
+    "how": "For an AR(1) level with variance S and learned retention F the innovation variance is S(1-F^2). Median per patient of that / the method's own estimate (learned F median 0.371)."
+   },
+   {
+    "knob": "f_max / gp_max_pairs / seed",
+    "value": [
+     0.999,
+     800,
+     0
+    ],
+    "kind": "numerical",
+    "meaning": "Cap on learned F, GP subsample size, RNG seed.",
+    "effect": "Stability / speed only.",
+    "how": "Kept."
+   }
+  ],
+  "hrkf": [
+   {
+    "knob": "gap_threshold_min",
+    "value": 180.0,
+    "kind": "pipeline",
+    "meaning": "A gap at least this long splits the recording; the filter restarts.",
+    "effect": "Higher: smooths across longer voids. Lower: more, shorter segments.",
+    "how": "Shared H8 constant. In this cohort 99% of gaps inside a segment are <= 120 min and the gap histogram has no natural break, so the data do not argue for moving it."
+   },
+   {
+    "knob": "min_segment_rows",
+    "value": 10,
+    "kind": "pipeline",
+    "meaning": "Segments with fewer readings are left unsmoothed.",
+    "effect": "Higher: fewer, more reliable estimates. Lower: smooths tiny fragments.",
+    "how": "Shared constant. 94.9% of readings sit in segments of >= 10."
+   },
+   {
+    "knob": "ref_dt_min",
+    "value": 10.0,
+    "kind": "derived",
+    "meaning": "Reference sampling step; elapsed time is measured in these units.",
+    "effect": "Must equal the real cadence, otherwise every rate is mis-scaled.",
+    "how": "Median gap between readings inside a segment = 10 min."
+   },
+   {
+    "knob": "n_harmonics",
+    "value": 3,
+    "kind": "derived",
+    "meaning": "Number of 24 h Fourier harmonics in the circadian term.",
+    "effect": "More: sharper daily shape, more parameters to learn per segment.",
+    "how": "Harmonic h kept if significant (p<0.05, autocorrelation-corrected F test) in >= 50% of patients: share significant {'1': 0.87, '2': 0.79, '3': 0.72}; 1-3 tested."
+   },
+   {
+    "knob": "period_min",
+    "value": 1440.0,
+    "kind": "physiology",
+    "meaning": "Length of the circadian cycle.",
+    "effect": "Fixed by biology.",
+    "how": "24 h."
+   },
+   {
+    "knob": "deltrend",
+    "value": 0.5611,
+    "kind": "derived",
+    "meaning": "Discount on the level: how much past information is kept per step.",
+    "effect": "Closer to 1: stiffer, smoother level. Lower: follows changes faster.",
+    "how": "1 - A, A = steady-state gain for signal-to-noise q/R = 0.343 (level change per reading q = 2S(1-e^(-dt/tau)) = 0.0158, noise R = 0.0459, S = 0.133, tau = 164 min, log units)."
+   },
+   {
+    "knob": "delseas",
+    "value": 1.0,
+    "kind": "derived",
+    "meaning": "Discount on the circadian harmonics: how fast the daily shape may change.",
+    "effect": "1: shape fixed once learned. Lower: shape adapts within the day.",
+    "how": "1 - A for r = (day-to-day change of the harmonic coefficients / readings per day) / R = 0. Day-to-day change beyond estimation noise: 0/day (0 = not detectable)."
+   },
+   {
+    "knob": "r_scale",
+    "value": 0.984,
+    "kind": "derived",
+    "meaning": "Multiplies the method's own noise estimate.",
+    "effect": "Higher: smoother.",
+    "how": "Median per patient of variogram noise R / the method's MAD noise."
+   },
+   {
+    "knob": "huber_delta",
+    "value": 1.345,
+    "kind": "convention",
+    "meaning": "Residual (in std) beyond which a reading is down-weighted.",
+    "effect": "Lower: more readings treated as outliers.",
+    "how": "Huber's 1.345: 95% efficiency when the noise is Gaussian."
+   },
+   {
+    "knob": "C0_var",
+    "value": 0.1333,
+    "kind": "derived",
+    "meaning": "Prior variance of the level at the start of each segment.",
+    "effect": "Higher: the first readings of a segment move the level more.",
+    "how": "The level's own variance S = 0.133 (log): how far it can be from the patient's median."
+   },
+   {
+    "knob": "C0_seas_var",
+    "value": [
+     0.01093,
+     0.005902,
+     0.001938
+    ],
+    "kind": "derived",
+    "meaning": "Prior variance of each circadian harmonic's two coefficients, per segment.",
+    "effect": "Higher: short segments can invent a large daily rhythm. The old value 1 let level and harmonics swing against each other (28% of outputs hit the range limits).",
+    "how": "amplitude^2 / 2 per harmonic (cos and sin share the amplitude), amplitudes 0.148 / 0.109 / 0.0623 (cohort median, log)."
+   },
+   {
+    "knob": "n_irls",
+    "value": 5,
+    "kind": "numerical",
+    "meaning": "IRLS iterations of the Huber solve.",
+    "effect": "Convergence only.",
+    "how": "Kept."
+   }
+  ],
+  "kim": [
+   {
+    "knob": "gap_threshold_min",
+    "value": 180.0,
+    "kind": "pipeline",
+    "meaning": "A gap at least this long splits the recording; the filter restarts.",
+    "effect": "Higher: smooths across longer voids. Lower: more, shorter segments.",
+    "how": "Shared H8 constant. In this cohort 99% of gaps inside a segment are <= 120 min and the gap histogram has no natural break, so the data do not argue for moving it."
+   },
+   {
+    "knob": "min_segment_rows",
+    "value": 10,
+    "kind": "pipeline",
+    "meaning": "Segments with fewer readings are left unsmoothed.",
+    "effect": "Higher: fewer, more reliable estimates. Lower: smooths tiny fragments.",
+    "how": "Shared constant. 94.9% of readings sit in segments of >= 10."
+   },
+   {
+    "knob": "phi",
+    "value": 0.9409,
+    "kind": "derived",
+    "meaning": "Retention of the level toward its regime mean per reading.",
+    "effect": "Higher: level wanders longer before returning.",
+    "how": "exp(-dt / tau) = exp(-10/164)."
+   },
+   {
+    "knob": "stickiness",
+    "value": 0.9409,
+    "kind": "derived",
+    "meaning": "Probability of staying in the same HRV regime at the next reading.",
+    "effect": "Higher: regimes persist longer.",
+    "how": "Same correlation time as the level: exp(-dt / tau)."
+   },
+   {
+    "knob": "q_scale",
+    "value": 0.2755,
+    "kind": "derived",
+    "meaning": "Process noise as a multiple of the method's MAD noise.",
+    "effect": "Higher: follows the signal more closely.",
+    "how": "Median per patient of the AR(1) innovation variance S(1-phi^2) / MAD noise."
+   },
+   {
+    "knob": "r_scale",
+    "value": 0.984,
+    "kind": "derived",
+    "meaning": "Observation noise as a multiple of the method's MAD noise.",
+    "effect": "Higher: smoother.",
+    "how": "Median per patient of variogram R / MAD noise."
+   },
+   {
+    "knob": "var_ratio",
+    "value": 0.2416,
+    "kind": "derived",
+    "meaning": "Noise in the high-HRV regime relative to the low one.",
+    "effect": "Only shifts how noisy each regime is assumed to be.",
+    "how": "Median per patient of the robust noise of readings above vs below the patient's median (low values reflect the device cap compressing high HRV)."
+   }
+  ],
+  "krlst": [
+   {
+    "knob": "gap_threshold_min",
+    "value": 180.0,
+    "kind": "pipeline",
+    "meaning": "A gap at least this long splits the recording; the filter restarts.",
+    "effect": "Higher: smooths across longer voids. Lower: more, shorter segments.",
+    "how": "Shared H8 constant. In this cohort 99% of gaps inside a segment are <= 120 min and the gap histogram has no natural break, so the data do not argue for moving it."
+   },
+   {
+    "knob": "min_segment_rows",
+    "value": 10,
+    "kind": "pipeline",
+    "meaning": "Segments with fewer readings are left unsmoothed.",
+    "effect": "Higher: fewer, more reliable estimates. Lower: smooths tiny fragments.",
+    "how": "Shared constant. 94.9% of readings sit in segments of >= 10."
+   },
+   {
+    "knob": "lengthscale_min",
+    "value": 116.0,
+    "kind": "derived",
+    "meaning": "RBF kernel lengthscale in minutes: how far apart readings still inform each other.",
+    "effect": "Longer: smoother.",
+    "how": "tau / sqrt(2): an RBF kernel's correlation reaches 1/e at sqrt(2) lengthscales; tau = 164 min."
+   },
+   {
+    "knob": "c",
+    "value": 0.4037,
+    "kind": "derived",
+    "meaning": "Noise-to-signal ratio.",
+    "effect": "Higher: smoother.",
+    "how": "Median per patient of R / S."
+   },
+   {
+    "knob": "forgetting_lambda",
+    "value": 0.9903,
+    "kind": "derived",
+    "meaning": "Per-reading forgetting; < 1 lets the tracker follow a drifting baseline.",
+    "effect": "Lower: forgets faster.",
+    "how": "exp(-dt / tau_day), tau_day = 1021 min."
+   },
+   {
+    "knob": "budget",
+    "value": 35,
+    "kind": "derived",
+    "meaning": "Dictionary size: past readings the tracker keeps.",
+    "effect": "Larger: more memory, cost grows as size^2.",
+    "how": "Readings within 3 lengthscales (older ones weigh < 1%): ceil(3 l / dt)."
+   },
+   {
+    "knob": "forgetmode / jitter",
+    "value": [
+     "B2P",
+     1e-06
+    ],
+    "kind": "numerical",
+    "meaning": "Forgetting scheme (back-to-prior, the authors' recommendation), Gram regulariser.",
+    "effect": "Stability only.",
+    "how": "Kept."
+   }
+  ],
+  "logmhw": [
+   {
+    "knob": "gap_threshold_min",
+    "value": 180.0,
+    "kind": "pipeline",
+    "meaning": "A gap at least this long splits the recording; the filter restarts.",
+    "effect": "Higher: smooths across longer voids. Lower: more, shorter segments.",
+    "how": "Shared H8 constant. In this cohort 99% of gaps inside a segment are <= 120 min and the gap histogram has no natural break, so the data do not argue for moving it."
+   },
+   {
+    "knob": "min_segment_rows",
+    "value": 10,
+    "kind": "pipeline",
+    "meaning": "Segments with fewer readings are left unsmoothed.",
+    "effect": "Higher: fewer, more reliable estimates. Lower: smooths tiny fragments.",
+    "how": "Shared constant. 94.9% of readings sit in segments of >= 10."
+   },
+   {
+    "knob": "ref_dt_min",
+    "value": 10.0,
+    "kind": "derived",
+    "meaning": "Reference sampling step; elapsed time is measured in these units.",
+    "effect": "Must equal the real cadence, otherwise every rate is mis-scaled.",
+    "how": "Median gap between readings inside a segment = 10 min."
+   },
+   {
+    "knob": "optimize",
+    "value": false,
+    "kind": "structural",
+    "meaning": "If True, alpha/beta/phi are fitted per patient (statsmodels MLE).",
+    "effect": "True = per-patient settings; reserved for the per-patient experiment.",
+    "how": "Off: this run uses the cohort value of the same MLE."
+   },
+   {
+    "knob": "alpha",
+    "value": 0.1563,
+    "kind": "derived",
+    "meaning": "Level smoothing weight of each new reading.",
+    "effect": "Lower: smoother.",
+    "how": "Median per patient of the damped-Holt MLE on the deseasonalised longest segment (the method's own optimiser). Cross-check, variogram gain A = 0.439."
+   },
+   {
+    "knob": "beta",
+    "value": 0.0,
+    "kind": "derived",
+    "meaning": "Trend smoothing weight.",
+    "effect": "Higher: trend reacts faster.",
+    "how": "Median per patient of the same MLE (0 = no trend needed)."
+   },
+   {
+    "knob": "phi",
+    "value": 0.8892,
+    "kind": "derived",
+    "meaning": "Trend damping per reading.",
+    "effect": "Lower: trend dies out faster.",
+    "how": "Median per patient of the same MLE."
+   },
+   {
+    "knob": "gamma",
+    "value": 0.0,
+    "kind": "derived",
+    "meaning": "Weight of a new reading on its time-of-day seasonal value.",
+    "effect": "0: daily profile fixed. Higher: profile adapts.",
+    "how": "Each time-of-day bucket is updated once a day, so gain A for r = day-to-day change / R = 0."
+   },
+   {
+    "knob": "buckets_per_day",
+    "value": 144,
+    "kind": "derived",
+    "meaning": "Time-of-day buckets for the seasonal profile.",
+    "effect": "One per reading slot.",
+    "how": "1440 / dt = 144."
+   }
+  ],
+  "ossa": [
+   {
+    "knob": "gap_threshold_min",
+    "value": 180.0,
+    "kind": "pipeline",
+    "meaning": "A gap at least this long splits the recording; the filter restarts.",
+    "effect": "Higher: smooths across longer voids. Lower: more, shorter segments.",
+    "how": "Shared H8 constant. In this cohort 99% of gaps inside a segment are <= 120 min and the gap histogram has no natural break, so the data do not argue for moving it."
+   },
+   {
+    "knob": "min_segment_rows",
+    "value": 10,
+    "kind": "pipeline",
+    "meaning": "Segments with fewer readings are left unsmoothed.",
+    "effect": "Higher: fewer, more reliable estimates. Lower: smooths tiny fragments.",
+    "how": "Shared constant. 94.9% of readings sit in segments of >= 10."
+   },
+   {
+    "knob": "window_max",
+    "value": 144,
+    "kind": "derived",
+    "meaning": "Longest trailing window (readings) the SVD looks at.",
+    "effect": "Longer: slower patterns resolved, more lag after a change.",
+    "how": "One day of readings (1440 / dt), the longest physiological cycle. Note half of segments are <= 11 readings, so the window is usually the whole segment so far."
+   },
+   {
+    "knob": "n_components",
+    "value": 8,
+    "kind": "derived",
+    "meaning": "Leading singular components kept as signal.",
+    "effect": "Fewer: smoother.",
+    "how": "Median per patient of the Gavish-Donoho optimal rank (known noise = variogram R) of one-day Hankel windows."
+   },
+   {
+    "knob": "l_frac",
+    "value": 0.5,
+    "kind": "convention",
+    "meaning": "Embedding dimension as a fraction of the window.",
+    "effect": "-",
+    "how": "L = N/2 (Golyandina & Zhigljavsky)."
+   },
+   {
+    "knob": "min_window",
+    "value": 8,
+    "kind": "numerical",
+    "meaning": "Below this many readings, emit a trailing mean.",
+    "effect": "Warm-up only.",
+    "how": "Kept."
+   }
+  ],
+  "rspf": [
+   {
+    "knob": "gap_threshold_min",
+    "value": 180.0,
+    "kind": "pipeline",
+    "meaning": "A gap at least this long splits the recording; the filter restarts.",
+    "effect": "Higher: smooths across longer voids. Lower: more, shorter segments.",
+    "how": "Shared H8 constant. In this cohort 99% of gaps inside a segment are <= 120 min and the gap histogram has no natural break, so the data do not argue for moving it."
+   },
+   {
+    "knob": "min_segment_rows",
+    "value": 10,
+    "kind": "pipeline",
+    "meaning": "Segments with fewer readings are left unsmoothed.",
+    "effect": "Higher: fewer, more reliable estimates. Lower: smooths tiny fragments.",
+    "how": "Shared constant. 94.9% of readings sit in segments of >= 10."
+   },
+   {
+    "knob": "K",
+    "value": 3,
+    "kind": "derived",
+    "meaning": "Number of HRV regimes.",
+    "effect": "More: more baseline levels to switch between.",
+    "how": "Activity states (sleep / rest / active, from the watch) whose HRV differs across patients (paired Wilcoxon, Bonferroni): sleep_vs_rest p=0.00024, rest_vs_active p=0.00016, sleep_vs_active p=0.0011"
+   },
+   {
+    "knob": "stickiness",
+    "value": 0.9052,
+    "kind": "derived",
+    "meaning": "Probability of staying in the same regime at the next reading.",
+    "effect": "Higher: regimes persist longer.",
+    "how": "exp(-dt / tau), logit tau = 100 min."
+   },
+   {
+    "knob": "reversion_tau_min",
+    "value": 100.4,
+    "kind": "derived",
+    "meaning": "Minutes for the level to revert to its regime mean.",
+    "effect": "Longer: stiffer level.",
+    "how": "Variogram correlation time in logit space."
+   },
+   {
+    "knob": "sigma_level_frac",
+    "value": 0.2839,
+    "kind": "derived",
+    "meaning": "Level shock per 10 min, as a fraction of the patient's spread.",
+    "effect": "Lower: smoother.",
+    "how": "Median per patient of sqrt(S(1-phi^2)) / spread (logit units)."
+   },
+   {
+    "knob": "sigma_seas",
+    "value": 0.0,
+    "kind": "derived",
+    "meaning": "Per-step drift of the circadian coefficients.",
+    "effect": "0: rhythm fixed.",
+    "how": "sqrt(day-to-day change of the harmonic coefficients / readings per day)."
+   },
+   {
+    "knob": "circ_init_frac",
+    "value": 0.3122,
+    "kind": "derived",
+    "meaning": "Starting circadian amplitude relative to the spread.",
+    "effect": "Prior only.",
+    "how": "Median per patient of first-harmonic amplitude / spread."
+   },
+   {
+    "knob": "n_particles / seed",
+    "value": [
+     500,
+     0
+    ],
+    "kind": "numerical",
+    "meaning": "Monte Carlo particles, RNG seed.",
+    "effect": "More: less Monte Carlo noise, slower.",
+    "how": "Kept."
+   },
+   {
+    "knob": "min_obs_sigma / min_logit_spread",
+    "value": [
+     1.0,
+     0.2
+    ],
+    "kind": "numerical",
+    "meaning": "Floors.",
+    "effect": "Guards only.",
+    "how": "Kept."
+   }
+  ]
+ },
+ "copd": {
+  "anrewma": [
+   {
+    "knob": "gap_threshold_min",
+    "value": 180.0,
+    "kind": "pipeline",
+    "meaning": "A gap at least this long splits the recording; the filter restarts.",
+    "effect": "Higher: smooths across longer voids. Lower: more, shorter segments.",
+    "how": "Shared H8 constant. In this cohort 99% of gaps inside a segment are <= 130 min and the gap histogram has no natural break, so the data do not argue for moving it."
+   },
+   {
+    "knob": "min_segment_rows",
+    "value": 10,
+    "kind": "pipeline",
+    "meaning": "Segments with fewer readings are left unsmoothed.",
+    "effect": "Higher: fewer, more reliable estimates. Lower: smooths tiny fragments.",
+    "how": "Shared constant. 95.0% of readings sit in segments of >= 10."
+   },
+   {
+    "knob": "ref_dt_min",
+    "value": 10.0,
+    "kind": "derived",
+    "meaning": "Reference sampling step; elapsed time is measured in these units.",
+    "effect": "Must equal the real cadence, otherwise every rate is mis-scaled.",
+    "how": "Median gap between readings inside a segment = 10 min."
+   },
+   {
+    "knob": "norm_alpha",
+    "value": 0.01105,
+    "kind": "derived",
+    "meaning": "EWMA rate of the running mean/std used to normalise (the slow baseline).",
+    "effect": "Higher: normaliser follows faster drift. Lower: steadier baseline.",
+    "how": "1 - exp(-dt / tau_day), tau_day = 900 min from the day-to-day correlation of daily medians (r = 0.202, 1244 day pairs)."
+   },
+   {
+    "knob": "ewma_r",
+    "value": 0.3205,
+    "kind": "derived",
+    "meaning": "Measurement noise of the robust EWMA, in normalised (z) units.",
+    "effect": "Higher (vs ewma_q): smoother output.",
+    "how": "Noise share of the variance: R/(R+S) = 368/(368+781) (raw HRV units)."
+   },
+   {
+    "knob": "ewma_q",
+    "value": 0.1568,
+    "kind": "derived",
+    "meaning": "Process noise per reading of the robust EWMA (z units).",
+    "effect": "Higher (vs ewma_r): follows the signal more closely.",
+    "how": "Level change per reading 2S(1-e^(-dt/tau)) / (R+S), tau = 82 min."
+   },
+   {
+    "knob": "ewma_c",
+    "value": 1.0,
+    "kind": "convention",
+    "meaning": "Soft outlier threshold of the IMQ weight, in z units.",
+    "effect": "Lower: more readings treated as outliers and ignored.",
+    "how": "WoLF default (Duran-Martin et al. 2024): c = 1."
+   },
+   {
+    "knob": "winsor",
+    "value": 3.0,
+    "kind": "convention",
+    "meaning": "|z| clip when updating the normaliser.",
+    "effect": "Lower: more robust normaliser.",
+    "how": "3 sigma rule."
+   },
+   {
+    "knob": "norm_init_window",
+    "value": 20,
+    "kind": "numerical",
+    "meaning": "Readings used to start the normaliser in each segment.",
+    "effect": "Higher: steadier start. Note: the start uses up to 20 readings ahead.",
+    "how": "Kept. Half of all segments are shorter than this, so it mostly equals the segment."
+   },
+   {
+    "knob": "sigma_floor_frac",
+    "value": 0.05,
+    "kind": "numerical",
+    "meaning": "Floor on the normaliser std.",
+    "effect": "Guard only.",
+    "how": "Kept."
+   }
+  ],
+  "ctimm": [
+   {
+    "knob": "gap_threshold_min",
+    "value": 180.0,
+    "kind": "pipeline",
+    "meaning": "A gap at least this long splits the recording; the filter restarts.",
+    "effect": "Higher: smooths across longer voids. Lower: more, shorter segments.",
+    "how": "Shared H8 constant. In this cohort 99% of gaps inside a segment are <= 130 min and the gap histogram has no natural break, so the data do not argue for moving it."
+   },
+   {
+    "knob": "min_segment_rows",
+    "value": 10,
+    "kind": "pipeline",
+    "meaning": "Segments with fewer readings are left unsmoothed.",
+    "effect": "Higher: fewer, more reliable estimates. Lower: smooths tiny fragments.",
+    "how": "Shared constant. 95.0% of readings sit in segments of >= 10."
+   },
+   {
+    "knob": "r_scale",
+    "value": 0.9503,
+    "kind": "derived",
+    "meaning": "Multiplies the method's own noise estimate (MAD of differences).",
+    "effect": "Higher: smoother.",
+    "how": "Median per patient of variogram noise R / the method's MAD noise, so the noise it assumes equals the white noise actually measured."
+   },
+   {
+    "knob": "q_scale",
+    "value": 0.04423,
+    "kind": "derived",
+    "meaning": "Level process noise per minute, as a multiple of the noise R.",
+    "effect": "Higher: follows the signal more closely. Lower: smoother.",
+    "how": "(q per reading / dt) / R = (0.0365/10)/0.0826."
+   },
+   {
+    "knob": "mode_mults",
+    "value": [
+     0.1137,
+     1.0,
+     3.632
+    ],
+    "kind": "derived",
+    "meaning": "Calm / normal / volatile modes: process-noise multipliers.",
+    "effect": "Wider spread: adapts stiffness over a wider range.",
+    "how": "10th, 50th and 90th percentile of hourly noise level across 9884 patient-hours, divided by the median."
+   },
+   {
+    "knob": "stickiness",
+    "value": 0.7948,
+    "kind": "derived",
+    "meaning": "Probability of staying in the same mode at the next reading.",
+    "effect": "Higher: modes persist longer.",
+    "how": "exp(-dt / tau_vol), tau_vol = 44 min: how long an hourly noise level stays correlated."
+   },
+   {
+    "knob": "ref_dt_min",
+    "value": 10.0,
+    "kind": "numerical",
+    "meaning": "Declared but not used by the code (time enters in minutes).",
+    "effect": "None.",
+    "how": "-"
+   }
+  ],
+  "gammadglm": [
+   {
+    "knob": "gap_threshold_min",
+    "value": 180.0,
+    "kind": "pipeline",
+    "meaning": "A gap at least this long splits the recording; the filter restarts.",
+    "effect": "Higher: smooths across longer voids. Lower: more, shorter segments.",
+    "how": "Shared H8 constant. In this cohort 99% of gaps inside a segment are <= 130 min and the gap histogram has no natural break, so the data do not argue for moving it."
+   },
+   {
+    "knob": "min_segment_rows",
+    "value": 10,
+    "kind": "pipeline",
+    "meaning": "Segments with fewer readings are left unsmoothed.",
+    "effect": "Higher: fewer, more reliable estimates. Lower: smooths tiny fragments.",
+    "how": "Shared constant. 95.0% of readings sit in segments of >= 10."
+   },
+   {
+    "knob": "ref_dt_min",
+    "value": 10.0,
+    "kind": "derived",
+    "meaning": "Reference sampling step; elapsed time is measured in these units.",
+    "effect": "Must equal the real cadence, otherwise every rate is mis-scaled.",
+    "how": "Median gap between readings inside a segment = 10 min."
+   },
+   {
+    "knob": "n_harmonics",
+    "value": 3,
+    "kind": "derived",
+    "meaning": "Number of 24 h Fourier harmonics in the circadian term.",
+    "effect": "More: sharper daily shape, more parameters to learn per segment.",
+    "how": "Harmonic h kept if significant (p<0.05, autocorrelation-corrected F test) in >= 50% of patients: share significant {'1': 0.96, '2': 0.88, '3': 0.68}; 1-3 tested."
+   },
+   {
+    "knob": "period_min",
+    "value": 1440.0,
+    "kind": "physiology",
+    "meaning": "Length of the circadian cycle.",
+    "effect": "Fixed by biology.",
+    "how": "24 h."
+   },
+   {
+    "knob": "deltrend",
+    "value": 0.5203,
+    "kind": "derived",
+    "meaning": "Discount on the level: how much past information is kept per step.",
+    "effect": "Closer to 1: stiffer, smoother level. Lower: follows changes faster.",
+    "how": "1 - A, A = steady-state gain for signal-to-noise q/R = 0.442 (level change per reading q = 2S(1-e^(-dt/tau)) = 0.0365, noise R = 0.0826, S = 0.161, tau = 83 min, log units)."
+   },
+   {
+    "knob": "delseas",
+    "value": 0.9902,
+    "kind": "derived",
+    "meaning": "Discount on the circadian harmonics: how fast the daily shape may change.",
+    "effect": "1: shape fixed once learned. Lower: shape adapts within the day.",
+    "how": "1 - A for r = (day-to-day change of the harmonic coefficients / readings per day) / R = 9.62e-05. Day-to-day change beyond estimation noise: 0.00114/day (0 = not detectable)."
+   },
+   {
+    "knob": "shape_scale",
+    "value": 0.9714,
+    "kind": "derived",
+    "meaning": "Multiplies the Gamma shape the method calibrates per patient (shape = observation precision).",
+    "effect": "Higher: readings trusted more -> follows them closely. Lower: smoother.",
+    "how": "For Gamma noise Var(log y) ~ 1/shape, so the right shape is 1/R. Median per patient of (1/R) / the method's own shape (median^2 / MAD-noise)."
+   },
+   {
+    "knob": "C0_var",
+    "value": 0.1608,
+    "kind": "derived",
+    "meaning": "Prior variance of the level at the start of each segment.",
+    "effect": "Higher: the first readings of a segment move the level more.",
+    "how": "The level's own variance S = 0.161 (log): how far it can be from the patient's median."
+   },
+   {
+    "knob": "C0_seas_var",
+    "value": [
+     0.01109,
+     0.01114,
+     0.003606
+    ],
+    "kind": "derived",
+    "meaning": "Prior variance of each circadian harmonic's two coefficients, per segment.",
+    "effect": "Higher: short segments can invent a large daily rhythm. The old value 1 let level and harmonics swing against each other (28% of outputs hit the range limits).",
+    "how": "amplitude^2 / 2 per harmonic (cos and sin share the amplitude), amplitudes 0.149 / 0.149 / 0.0849 (cohort median, log)."
+   },
+   {
+    "knob": "q_floor / q_cap",
+    "value": [
+     1e-06,
+     5.0
+    ],
+    "kind": "numerical",
+    "meaning": "Bounds on the linear-predictor variance.",
+    "effect": "Guards only.",
+    "how": "Kept."
+   }
+  ],
+  "gpssm": [
+   {
+    "knob": "gap_threshold_min",
+    "value": 180.0,
+    "kind": "pipeline",
+    "meaning": "A gap at least this long splits the recording; the filter restarts.",
+    "effect": "Higher: smooths across longer voids. Lower: more, shorter segments.",
+    "how": "Shared H8 constant. In this cohort 99% of gaps inside a segment are <= 130 min and the gap histogram has no natural break, so the data do not argue for moving it."
+   },
+   {
+    "knob": "min_segment_rows",
+    "value": 10,
+    "kind": "pipeline",
+    "meaning": "Segments with fewer readings are left unsmoothed.",
+    "effect": "Higher: fewer, more reliable estimates. Lower: smooths tiny fragments.",
+    "how": "Shared constant. 95.0% of readings sit in segments of >= 10."
+   },
+   {
+    "knob": "r_scale",
+    "value": 0.9673,
+    "kind": "derived",
+    "meaning": "Multiplies the method's own noise estimate.",
+    "effect": "Higher: smoother.",
+    "how": "Median per patient of variogram noise R / the method's MAD noise."
+   },
+   {
+    "knob": "q_scale",
+    "value": 0.9063,
+    "kind": "derived",
+    "meaning": "Multiplies the method's own process-noise estimate.",
+    "effect": "Higher: follows the signal more closely.",
+    "how": "For an AR(1) level with variance S and learned retention F the innovation variance is S(1-F^2). Median per patient of that / the method's own estimate (learned F median 0.360)."
+   },
+   {
+    "knob": "f_max / gp_max_pairs / seed",
+    "value": [
+     0.999,
+     800,
+     0
+    ],
+    "kind": "numerical",
+    "meaning": "Cap on learned F, GP subsample size, RNG seed.",
+    "effect": "Stability / speed only.",
+    "how": "Kept."
+   }
+  ],
+  "hrkf": [
+   {
+    "knob": "gap_threshold_min",
+    "value": 180.0,
+    "kind": "pipeline",
+    "meaning": "A gap at least this long splits the recording; the filter restarts.",
+    "effect": "Higher: smooths across longer voids. Lower: more, shorter segments.",
+    "how": "Shared H8 constant. In this cohort 99% of gaps inside a segment are <= 130 min and the gap histogram has no natural break, so the data do not argue for moving it."
+   },
+   {
+    "knob": "min_segment_rows",
+    "value": 10,
+    "kind": "pipeline",
+    "meaning": "Segments with fewer readings are left unsmoothed.",
+    "effect": "Higher: fewer, more reliable estimates. Lower: smooths tiny fragments.",
+    "how": "Shared constant. 95.0% of readings sit in segments of >= 10."
+   },
+   {
+    "knob": "ref_dt_min",
+    "value": 10.0,
+    "kind": "derived",
+    "meaning": "Reference sampling step; elapsed time is measured in these units.",
+    "effect": "Must equal the real cadence, otherwise every rate is mis-scaled.",
+    "how": "Median gap between readings inside a segment = 10 min."
+   },
+   {
+    "knob": "n_harmonics",
+    "value": 3,
+    "kind": "derived",
+    "meaning": "Number of 24 h Fourier harmonics in the circadian term.",
+    "effect": "More: sharper daily shape, more parameters to learn per segment.",
+    "how": "Harmonic h kept if significant (p<0.05, autocorrelation-corrected F test) in >= 50% of patients: share significant {'1': 0.96, '2': 0.88, '3': 0.68}; 1-3 tested."
+   },
+   {
+    "knob": "period_min",
+    "value": 1440.0,
+    "kind": "physiology",
+    "meaning": "Length of the circadian cycle.",
+    "effect": "Fixed by biology.",
+    "how": "24 h."
+   },
+   {
+    "knob": "deltrend",
+    "value": 0.5203,
+    "kind": "derived",
+    "meaning": "Discount on the level: how much past information is kept per step.",
+    "effect": "Closer to 1: stiffer, smoother level. Lower: follows changes faster.",
+    "how": "1 - A, A = steady-state gain for signal-to-noise q/R = 0.442 (level change per reading q = 2S(1-e^(-dt/tau)) = 0.0365, noise R = 0.0826, S = 0.161, tau = 83 min, log units)."
+   },
+   {
+    "knob": "delseas",
+    "value": 0.9902,
+    "kind": "derived",
+    "meaning": "Discount on the circadian harmonics: how fast the daily shape may change.",
+    "effect": "1: shape fixed once learned. Lower: shape adapts within the day.",
+    "how": "1 - A for r = (day-to-day change of the harmonic coefficients / readings per day) / R = 9.62e-05. Day-to-day change beyond estimation noise: 0.00114/day (0 = not detectable)."
+   },
+   {
+    "knob": "r_scale",
+    "value": 0.9503,
+    "kind": "derived",
+    "meaning": "Multiplies the method's own noise estimate.",
+    "effect": "Higher: smoother.",
+    "how": "Median per patient of variogram noise R / the method's MAD noise."
+   },
+   {
+    "knob": "huber_delta",
+    "value": 1.345,
+    "kind": "convention",
+    "meaning": "Residual (in std) beyond which a reading is down-weighted.",
+    "effect": "Lower: more readings treated as outliers.",
+    "how": "Huber's 1.345: 95% efficiency when the noise is Gaussian."
+   },
+   {
+    "knob": "C0_var",
+    "value": 0.1608,
+    "kind": "derived",
+    "meaning": "Prior variance of the level at the start of each segment.",
+    "effect": "Higher: the first readings of a segment move the level more.",
+    "how": "The level's own variance S = 0.161 (log): how far it can be from the patient's median."
+   },
+   {
+    "knob": "C0_seas_var",
+    "value": [
+     0.01109,
+     0.01114,
+     0.003606
+    ],
+    "kind": "derived",
+    "meaning": "Prior variance of each circadian harmonic's two coefficients, per segment.",
+    "effect": "Higher: short segments can invent a large daily rhythm. The old value 1 let level and harmonics swing against each other (28% of outputs hit the range limits).",
+    "how": "amplitude^2 / 2 per harmonic (cos and sin share the amplitude), amplitudes 0.149 / 0.149 / 0.0849 (cohort median, log)."
+   },
+   {
+    "knob": "n_irls",
+    "value": 5,
+    "kind": "numerical",
+    "meaning": "IRLS iterations of the Huber solve.",
+    "effect": "Convergence only.",
+    "how": "Kept."
+   }
+  ],
+  "kim": [
+   {
+    "knob": "gap_threshold_min",
+    "value": 180.0,
+    "kind": "pipeline",
+    "meaning": "A gap at least this long splits the recording; the filter restarts.",
+    "effect": "Higher: smooths across longer voids. Lower: more, shorter segments.",
+    "how": "Shared H8 constant. In this cohort 99% of gaps inside a segment are <= 130 min and the gap histogram has no natural break, so the data do not argue for moving it."
+   },
+   {
+    "knob": "min_segment_rows",
+    "value": 10,
+    "kind": "pipeline",
+    "meaning": "Segments with fewer readings are left unsmoothed.",
+    "effect": "Higher: fewer, more reliable estimates. Lower: smooths tiny fragments.",
+    "how": "Shared constant. 95.0% of readings sit in segments of >= 10."
+   },
+   {
+    "knob": "phi",
+    "value": 0.8864,
+    "kind": "derived",
+    "meaning": "Retention of the level toward its regime mean per reading.",
+    "effect": "Higher: level wanders longer before returning.",
+    "how": "exp(-dt / tau) = exp(-10/83)."
+   },
+   {
+    "knob": "stickiness",
+    "value": 0.8864,
+    "kind": "derived",
+    "meaning": "Probability of staying in the same HRV regime at the next reading.",
+    "effect": "Higher: regimes persist longer.",
+    "how": "Same correlation time as the level: exp(-dt / tau)."
+   },
+   {
+    "knob": "q_scale",
+    "value": 0.3316,
+    "kind": "derived",
+    "meaning": "Process noise as a multiple of the method's MAD noise.",
+    "effect": "Higher: follows the signal more closely.",
+    "how": "Median per patient of the AR(1) innovation variance S(1-phi^2) / MAD noise."
+   },
+   {
+    "knob": "r_scale",
+    "value": 0.9503,
+    "kind": "derived",
+    "meaning": "Observation noise as a multiple of the method's MAD noise.",
+    "effect": "Higher: smoother.",
+    "how": "Median per patient of variogram R / MAD noise."
+   },
+   {
+    "knob": "var_ratio",
+    "value": 1.154,
+    "kind": "derived",
+    "meaning": "Noise in the high-HRV regime relative to the low one.",
+    "effect": "Only shifts how noisy each regime is assumed to be.",
+    "how": "Median per patient of the robust noise of readings above vs below the patient's median (low values reflect the device cap compressing high HRV)."
+   }
+  ],
+  "krlst": [
+   {
+    "knob": "gap_threshold_min",
+    "value": 180.0,
+    "kind": "pipeline",
+    "meaning": "A gap at least this long splits the recording; the filter restarts.",
+    "effect": "Higher: smooths across longer voids. Lower: more, shorter segments.",
+    "how": "Shared H8 constant. In this cohort 99% of gaps inside a segment are <= 130 min and the gap histogram has no natural break, so the data do not argue for moving it."
+   },
+   {
+    "knob": "min_segment_rows",
+    "value": 10,
+    "kind": "pipeline",
+    "meaning": "Segments with fewer readings are left unsmoothed.",
+    "effect": "Higher: fewer, more reliable estimates. Lower: smooths tiny fragments.",
+    "how": "Shared constant. 95.0% of readings sit in segments of >= 10."
+   },
+   {
+    "knob": "lengthscale_min",
+    "value": 58.65,
+    "kind": "derived",
+    "meaning": "RBF kernel lengthscale in minutes: how far apart readings still inform each other.",
+    "effect": "Longer: smoother.",
+    "how": "tau / sqrt(2): an RBF kernel's correlation reaches 1/e at sqrt(2) lengthscales; tau = 83 min."
+   },
+   {
+    "knob": "c",
+    "value": 0.4884,
+    "kind": "derived",
+    "meaning": "Noise-to-signal ratio.",
+    "effect": "Higher: smoother.",
+    "how": "Median per patient of R / S."
+   },
+   {
+    "knob": "forgetting_lambda",
+    "value": 0.989,
+    "kind": "derived",
+    "meaning": "Per-reading forgetting; < 1 lets the tracker follow a drifting baseline.",
+    "effect": "Lower: forgets faster.",
+    "how": "exp(-dt / tau_day), tau_day = 900 min."
+   },
+   {
+    "knob": "budget",
+    "value": 18,
+    "kind": "derived",
+    "meaning": "Dictionary size: past readings the tracker keeps.",
+    "effect": "Larger: more memory, cost grows as size^2.",
+    "how": "Readings within 3 lengthscales (older ones weigh < 1%): ceil(3 l / dt)."
+   },
+   {
+    "knob": "forgetmode / jitter",
+    "value": [
+     "B2P",
+     1e-06
+    ],
+    "kind": "numerical",
+    "meaning": "Forgetting scheme (back-to-prior, the authors' recommendation), Gram regulariser.",
+    "effect": "Stability only.",
+    "how": "Kept."
+   }
+  ],
+  "logmhw": [
+   {
+    "knob": "gap_threshold_min",
+    "value": 180.0,
+    "kind": "pipeline",
+    "meaning": "A gap at least this long splits the recording; the filter restarts.",
+    "effect": "Higher: smooths across longer voids. Lower: more, shorter segments.",
+    "how": "Shared H8 constant. In this cohort 99% of gaps inside a segment are <= 130 min and the gap histogram has no natural break, so the data do not argue for moving it."
+   },
+   {
+    "knob": "min_segment_rows",
+    "value": 10,
+    "kind": "pipeline",
+    "meaning": "Segments with fewer readings are left unsmoothed.",
+    "effect": "Higher: fewer, more reliable estimates. Lower: smooths tiny fragments.",
+    "how": "Shared constant. 95.0% of readings sit in segments of >= 10."
+   },
+   {
+    "knob": "ref_dt_min",
+    "value": 10.0,
+    "kind": "derived",
+    "meaning": "Reference sampling step; elapsed time is measured in these units.",
+    "effect": "Must equal the real cadence, otherwise every rate is mis-scaled.",
+    "how": "Median gap between readings inside a segment = 10 min."
+   },
+   {
+    "knob": "optimize",
+    "value": false,
+    "kind": "structural",
+    "meaning": "If True, alpha/beta/phi are fitted per patient (statsmodels MLE).",
+    "effect": "True = per-patient settings; reserved for the per-patient experiment.",
+    "how": "Off: this run uses the cohort value of the same MLE."
+   },
+   {
+    "knob": "alpha",
+    "value": 0.05113,
+    "kind": "derived",
+    "meaning": "Level smoothing weight of each new reading.",
+    "effect": "Lower: smoother.",
+    "how": "Median per patient of the damped-Holt MLE on the deseasonalised longest segment (the method's own optimiser). Cross-check, variogram gain A = 0.48."
+   },
+   {
+    "knob": "beta",
+    "value": 0.0,
+    "kind": "derived",
+    "meaning": "Trend smoothing weight.",
+    "effect": "Higher: trend reacts faster.",
+    "how": "Median per patient of the same MLE (0 = no trend needed)."
+   },
+   {
+    "knob": "phi",
+    "value": 0.9087,
+    "kind": "derived",
+    "meaning": "Trend damping per reading.",
+    "effect": "Lower: trend dies out faster.",
+    "how": "Median per patient of the same MLE."
+   },
+   {
+    "knob": "gamma",
+    "value": 0.1109,
+    "kind": "derived",
+    "meaning": "Weight of a new reading on its time-of-day seasonal value.",
+    "effect": "0: daily profile fixed. Higher: profile adapts.",
+    "how": "Each time-of-day bucket is updated once a day, so gain A for r = day-to-day change / R = 0.0138."
+   },
+   {
+    "knob": "buckets_per_day",
+    "value": 144,
+    "kind": "derived",
+    "meaning": "Time-of-day buckets for the seasonal profile.",
+    "effect": "One per reading slot.",
+    "how": "1440 / dt = 144."
+   }
+  ],
+  "ossa": [
+   {
+    "knob": "gap_threshold_min",
+    "value": 180.0,
+    "kind": "pipeline",
+    "meaning": "A gap at least this long splits the recording; the filter restarts.",
+    "effect": "Higher: smooths across longer voids. Lower: more, shorter segments.",
+    "how": "Shared H8 constant. In this cohort 99% of gaps inside a segment are <= 130 min and the gap histogram has no natural break, so the data do not argue for moving it."
+   },
+   {
+    "knob": "min_segment_rows",
+    "value": 10,
+    "kind": "pipeline",
+    "meaning": "Segments with fewer readings are left unsmoothed.",
+    "effect": "Higher: fewer, more reliable estimates. Lower: smooths tiny fragments.",
+    "how": "Shared constant. 95.0% of readings sit in segments of >= 10."
+   },
+   {
+    "knob": "window_max",
+    "value": 144,
+    "kind": "derived",
+    "meaning": "Longest trailing window (readings) the SVD looks at.",
+    "effect": "Longer: slower patterns resolved, more lag after a change.",
+    "how": "One day of readings (1440 / dt), the longest physiological cycle. Note half of segments are <= 10 readings, so the window is usually the whole segment so far."
+   },
+   {
+    "knob": "n_components",
+    "value": 11,
+    "kind": "derived",
+    "meaning": "Leading singular components kept as signal.",
+    "effect": "Fewer: smoother.",
+    "how": "Median per patient of the Gavish-Donoho optimal rank (known noise = variogram R) of one-day Hankel windows."
+   },
+   {
+    "knob": "l_frac",
+    "value": 0.5,
+    "kind": "convention",
+    "meaning": "Embedding dimension as a fraction of the window.",
+    "effect": "-",
+    "how": "L = N/2 (Golyandina & Zhigljavsky)."
+   },
+   {
+    "knob": "min_window",
+    "value": 8,
+    "kind": "numerical",
+    "meaning": "Below this many readings, emit a trailing mean.",
+    "effect": "Warm-up only.",
+    "how": "Kept."
+   }
+  ],
+  "rspf": [
+   {
+    "knob": "gap_threshold_min",
+    "value": 180.0,
+    "kind": "pipeline",
+    "meaning": "A gap at least this long splits the recording; the filter restarts.",
+    "effect": "Higher: smooths across longer voids. Lower: more, shorter segments.",
+    "how": "Shared H8 constant. In this cohort 99% of gaps inside a segment are <= 130 min and the gap histogram has no natural break, so the data do not argue for moving it."
+   },
+   {
+    "knob": "min_segment_rows",
+    "value": 10,
+    "kind": "pipeline",
+    "meaning": "Segments with fewer readings are left unsmoothed.",
+    "effect": "Higher: fewer, more reliable estimates. Lower: smooths tiny fragments.",
+    "how": "Shared constant. 95.0% of readings sit in segments of >= 10."
+   },
+   {
+    "knob": "K",
+    "value": 3,
+    "kind": "derived",
+    "meaning": "Number of HRV regimes.",
+    "effect": "More: more baseline levels to switch between.",
+    "how": "Activity states (sleep / rest / active, from the watch) whose HRV differs across patients (paired Wilcoxon, Bonferroni): sleep_vs_rest p=1e-05, rest_vs_active p=0.011, sleep_vs_active p=0.00015"
+   },
+   {
+    "knob": "stickiness",
+    "value": 0.8992,
+    "kind": "derived",
+    "meaning": "Probability of staying in the same regime at the next reading.",
+    "effect": "Higher: regimes persist longer.",
+    "how": "exp(-dt / tau), logit tau = 94 min."
+   },
+   {
+    "knob": "reversion_tau_min",
+    "value": 94.08,
+    "kind": "derived",
+    "meaning": "Minutes for the level to revert to its regime mean.",
+    "effect": "Longer: stiffer level.",
+    "how": "Variogram correlation time in logit space."
+   },
+   {
+    "knob": "sigma_level_frac",
+    "value": 0.3396,
+    "kind": "derived",
+    "meaning": "Level shock per 10 min, as a fraction of the patient's spread.",
+    "effect": "Lower: smoother.",
+    "how": "Median per patient of sqrt(S(1-phi^2)) / spread (logit units)."
+   },
+   {
+    "knob": "sigma_seas",
+    "value": 0.0115,
+    "kind": "derived",
+    "meaning": "Per-step drift of the circadian coefficients.",
+    "effect": "0: rhythm fixed.",
+    "how": "sqrt(day-to-day change of the harmonic coefficients / readings per day)."
+   },
+   {
+    "knob": "circ_init_frac",
+    "value": 0.2659,
+    "kind": "derived",
+    "meaning": "Starting circadian amplitude relative to the spread.",
+    "effect": "Prior only.",
+    "how": "Median per patient of first-harmonic amplitude / spread."
+   },
+   {
+    "knob": "n_particles / seed",
+    "value": [
+     500,
+     0
+    ],
+    "kind": "numerical",
+    "meaning": "Monte Carlo particles, RNG seed.",
+    "effect": "More: less Monte Carlo noise, slower.",
+    "how": "Kept."
+   },
+   {
+    "knob": "min_obs_sigma / min_logit_spread",
+    "value": [
+     1.0,
+     0.2
+    ],
+    "kind": "numerical",
+    "meaning": "Floors.",
+    "effect": "Guards only.",
+    "how": "Kept."
+   }
+  ]
+ },
+ "combined": {
+  "anrewma": [
+   {
+    "knob": "gap_threshold_min",
+    "value": 180.0,
+    "kind": "pipeline",
+    "meaning": "A gap at least this long splits the recording; the filter restarts.",
+    "effect": "Higher: smooths across longer voids. Lower: more, shorter segments.",
+    "how": "Shared H8 constant. In this cohort 99% of gaps inside a segment are <= 120 min and the gap histogram has no natural break, so the data do not argue for moving it."
+   },
+   {
+    "knob": "min_segment_rows",
+    "value": 10,
+    "kind": "pipeline",
+    "meaning": "Segments with fewer readings are left unsmoothed.",
+    "effect": "Higher: fewer, more reliable estimates. Lower: smooths tiny fragments.",
+    "how": "Shared constant. 94.9% of readings sit in segments of >= 10."
+   },
+   {
+    "knob": "ref_dt_min",
+    "value": 10.0,
+    "kind": "derived",
+    "meaning": "Reference sampling step; elapsed time is measured in these units.",
+    "effect": "Must equal the real cadence, otherwise every rate is mis-scaled.",
+    "how": "Median gap between readings inside a segment = 10 min."
+   },
+   {
+    "knob": "norm_alpha",
+    "value": 0.009863,
+    "kind": "derived",
+    "meaning": "EWMA rate of the running mean/std used to normalise (the slow baseline).",
+    "effect": "Higher: normaliser follows faster drift. Lower: steadier baseline.",
+    "how": "1 - exp(-dt / tau_day), tau_day = 1009 min from the day-to-day correlation of daily medians (r = 0.240, 14365 day pairs)."
+   },
+   {
+    "knob": "ewma_r",
+    "value": 0.3017,
+    "kind": "derived",
+    "meaning": "Measurement noise of the robust EWMA, in normalised (z) units.",
+    "effect": "Higher (vs ewma_q): smoother output.",
+    "how": "Noise share of the variance: R/(R+S) = 303/(303+702) (raw HRV units)."
+   },
+   {
+    "knob": "ewma_q",
+    "value": 0.09511,
+    "kind": "derived",
+    "meaning": "Process noise per reading of the robust EWMA (z units).",
+    "effect": "Higher (vs ewma_r): follows the signal more closely.",
+    "how": "Level change per reading 2S(1-e^(-dt/tau)) / (R+S), tau = 142 min."
+   },
+   {
+    "knob": "ewma_c",
+    "value": 1.0,
+    "kind": "convention",
+    "meaning": "Soft outlier threshold of the IMQ weight, in z units.",
+    "effect": "Lower: more readings treated as outliers and ignored.",
+    "how": "WoLF default (Duran-Martin et al. 2024): c = 1."
+   },
+   {
+    "knob": "winsor",
+    "value": 3.0,
+    "kind": "convention",
+    "meaning": "|z| clip when updating the normaliser.",
+    "effect": "Lower: more robust normaliser.",
+    "how": "3 sigma rule."
+   },
+   {
+    "knob": "norm_init_window",
+    "value": 20,
+    "kind": "numerical",
+    "meaning": "Readings used to start the normaliser in each segment.",
+    "effect": "Higher: steadier start. Note: the start uses up to 20 readings ahead.",
+    "how": "Kept. Half of all segments are shorter than this, so it mostly equals the segment."
+   },
+   {
+    "knob": "sigma_floor_frac",
+    "value": 0.05,
+    "kind": "numerical",
+    "meaning": "Floor on the normaliser std.",
+    "effect": "Guard only.",
+    "how": "Kept."
+   }
+  ],
+  "ctimm": [
+   {
+    "knob": "gap_threshold_min",
+    "value": 180.0,
+    "kind": "pipeline",
+    "meaning": "A gap at least this long splits the recording; the filter restarts.",
+    "effect": "Higher: smooths across longer voids. Lower: more, shorter segments.",
+    "how": "Shared H8 constant. In this cohort 99% of gaps inside a segment are <= 120 min and the gap histogram has no natural break, so the data do not argue for moving it."
+   },
+   {
+    "knob": "min_segment_rows",
+    "value": 10,
+    "kind": "pipeline",
+    "meaning": "Segments with fewer readings are left unsmoothed.",
+    "effect": "Higher: fewer, more reliable estimates. Lower: smooths tiny fragments.",
+    "how": "Shared constant. 94.9% of readings sit in segments of >= 10."
+   },
+   {
+    "knob": "r_scale",
+    "value": 0.9817,
+    "kind": "derived",
+    "meaning": "Multiplies the method's own noise estimate (MAD of differences).",
+    "effect": "Higher: smoother.",
+    "how": "Median per patient of variogram noise R / the method's MAD noise, so the noise it assumes equals the white noise actually measured."
+   },
+   {
+    "knob": "q_scale",
+    "value": 0.03549,
+    "kind": "derived",
+    "meaning": "Level process noise per minute, as a multiple of the noise R.",
+    "effect": "Higher: follows the signal more closely. Lower: smoother.",
+    "how": "(q per reading / dt) / R = (0.0177/10)/0.0497."
+   },
+   {
+    "knob": "mode_mults",
+    "value": [
+     0.0917,
+     1.0,
+     4.548
+    ],
+    "kind": "derived",
+    "meaning": "Calm / normal / volatile modes: process-noise multipliers.",
+    "effect": "Wider spread: adapts stiffness over a wider range.",
+    "how": "10th, 50th and 90th percentile of hourly noise level across 107256 patient-hours, divided by the median."
+   },
+   {
+    "knob": "stickiness",
+    "value": 0.8099,
+    "kind": "derived",
+    "meaning": "Probability of staying in the same mode at the next reading.",
+    "effect": "Higher: modes persist longer.",
+    "how": "exp(-dt / tau_vol), tau_vol = 47 min: how long an hourly noise level stays correlated."
+   },
+   {
+    "knob": "ref_dt_min",
+    "value": 10.0,
+    "kind": "numerical",
+    "meaning": "Declared but not used by the code (time enters in minutes).",
+    "effect": "None.",
+    "how": "-"
+   }
+  ],
+  "gammadglm": [
+   {
+    "knob": "gap_threshold_min",
+    "value": 180.0,
+    "kind": "pipeline",
+    "meaning": "A gap at least this long splits the recording; the filter restarts.",
+    "effect": "Higher: smooths across longer voids. Lower: more, shorter segments.",
+    "how": "Shared H8 constant. In this cohort 99% of gaps inside a segment are <= 120 min and the gap histogram has no natural break, so the data do not argue for moving it."
+   },
+   {
+    "knob": "min_segment_rows",
+    "value": 10,
+    "kind": "pipeline",
+    "meaning": "Segments with fewer readings are left unsmoothed.",
+    "effect": "Higher: fewer, more reliable estimates. Lower: smooths tiny fragments.",
+    "how": "Shared constant. 94.9% of readings sit in segments of >= 10."
+   },
+   {
+    "knob": "ref_dt_min",
+    "value": 10.0,
+    "kind": "derived",
+    "meaning": "Reference sampling step; elapsed time is measured in these units.",
+    "effect": "Must equal the real cadence, otherwise every rate is mis-scaled.",
+    "how": "Median gap between readings inside a segment = 10 min."
+   },
+   {
+    "knob": "n_harmonics",
+    "value": 3,
+    "kind": "derived",
+    "meaning": "Number of 24 h Fourier harmonics in the circadian term.",
+    "effect": "More: sharper daily shape, more parameters to learn per segment.",
+    "how": "Harmonic h kept if significant (p<0.05, autocorrelation-corrected F test) in >= 50% of patients: share significant {'1': 0.88, '2': 0.8, '3': 0.71}; 1-3 tested."
+   },
+   {
+    "knob": "period_min",
+    "value": 1440.0,
+    "kind": "physiology",
+    "meaning": "Length of the circadian cycle.",
+    "effect": "Fixed by biology.",
+    "how": "24 h."
+   },
+   {
+    "knob": "deltrend",
+    "value": 0.5558,
+    "kind": "derived",
+    "meaning": "Discount on the level: how much past information is kept per step.",
+    "effect": "Closer to 1: stiffer, smoother level. Lower: follows changes faster.",
+    "how": "1 - A, A = steady-state gain for signal-to-noise q/R = 0.355 (level change per reading q = 2S(1-e^(-dt/tau)) = 0.0177, noise R = 0.0497, S = 0.137, tau = 150 min, log units)."
+   },
+   {
+    "knob": "delseas",
+    "value": 1.0,
+    "kind": "derived",
+    "meaning": "Discount on the circadian harmonics: how fast the daily shape may change.",
+    "effect": "1: shape fixed once learned. Lower: shape adapts within the day.",
+    "how": "1 - A for r = (day-to-day change of the harmonic coefficients / readings per day) / R = 0. Day-to-day change beyond estimation noise: 0/day (0 = not detectable)."
+   },
+   {
+    "knob": "shape_scale",
+    "value": 0.8828,
+    "kind": "derived",
+    "meaning": "Multiplies the Gamma shape the method calibrates per patient (shape = observation precision).",
+    "effect": "Higher: readings trusted more -> follows them closely. Lower: smoother.",
+    "how": "For Gamma noise Var(log y) ~ 1/shape, so the right shape is 1/R. Median per patient of (1/R) / the method's own shape (median^2 / MAD-noise)."
+   },
+   {
+    "knob": "C0_var",
+    "value": 0.1365,
+    "kind": "derived",
+    "meaning": "Prior variance of the level at the start of each segment.",
+    "effect": "Higher: the first readings of a segment move the level more.",
+    "how": "The level's own variance S = 0.137 (log): how far it can be from the patient's median."
+   },
+   {
+    "knob": "C0_seas_var",
+    "value": [
+     0.01101,
+     0.006616,
+     0.002147
+    ],
+    "kind": "derived",
+    "meaning": "Prior variance of each circadian harmonic's two coefficients, per segment.",
+    "effect": "Higher: short segments can invent a large daily rhythm. The old value 1 let level and harmonics swing against each other (28% of outputs hit the range limits).",
+    "how": "amplitude^2 / 2 per harmonic (cos and sin share the amplitude), amplitudes 0.148 / 0.115 / 0.0655 (cohort median, log)."
+   },
+   {
+    "knob": "q_floor / q_cap",
+    "value": [
+     1e-06,
+     5.0
+    ],
+    "kind": "numerical",
+    "meaning": "Bounds on the linear-predictor variance.",
+    "effect": "Guards only.",
+    "how": "Kept."
+   }
+  ],
+  "gpssm": [
+   {
+    "knob": "gap_threshold_min",
+    "value": 180.0,
+    "kind": "pipeline",
+    "meaning": "A gap at least this long splits the recording; the filter restarts.",
+    "effect": "Higher: smooths across longer voids. Lower: more, shorter segments.",
+    "how": "Shared H8 constant. In this cohort 99% of gaps inside a segment are <= 120 min and the gap histogram has no natural break, so the data do not argue for moving it."
+   },
+   {
+    "knob": "min_segment_rows",
+    "value": 10,
+    "kind": "pipeline",
+    "meaning": "Segments with fewer readings are left unsmoothed.",
+    "effect": "Higher: fewer, more reliable estimates. Lower: smooths tiny fragments.",
+    "how": "Shared constant. 94.9% of readings sit in segments of >= 10."
+   },
+   {
+    "knob": "r_scale",
+    "value": 0.9898,
+    "kind": "derived",
+    "meaning": "Multiplies the method's own noise estimate.",
+    "effect": "Higher: smoother.",
+    "how": "Median per patient of variogram noise R / the method's MAD noise."
+   },
+   {
+    "knob": "q_scale",
+    "value": 0.869,
+    "kind": "derived",
+    "meaning": "Multiplies the method's own process-noise estimate.",
+    "effect": "Higher: follows the signal more closely.",
+    "how": "For an AR(1) level with variance S and learned retention F the innovation variance is S(1-F^2). Median per patient of that / the method's own estimate (learned F median 0.367)."
+   },
+   {
+    "knob": "f_max / gp_max_pairs / seed",
+    "value": [
+     0.999,
+     800,
+     0
+    ],
+    "kind": "numerical",
+    "meaning": "Cap on learned F, GP subsample size, RNG seed.",
+    "effect": "Stability / speed only.",
+    "how": "Kept."
+   }
+  ],
+  "hrkf": [
+   {
+    "knob": "gap_threshold_min",
+    "value": 180.0,
+    "kind": "pipeline",
+    "meaning": "A gap at least this long splits the recording; the filter restarts.",
+    "effect": "Higher: smooths across longer voids. Lower: more, shorter segments.",
+    "how": "Shared H8 constant. In this cohort 99% of gaps inside a segment are <= 120 min and the gap histogram has no natural break, so the data do not argue for moving it."
+   },
+   {
+    "knob": "min_segment_rows",
+    "value": 10,
+    "kind": "pipeline",
+    "meaning": "Segments with fewer readings are left unsmoothed.",
+    "effect": "Higher: fewer, more reliable estimates. Lower: smooths tiny fragments.",
+    "how": "Shared constant. 94.9% of readings sit in segments of >= 10."
+   },
+   {
+    "knob": "ref_dt_min",
+    "value": 10.0,
+    "kind": "derived",
+    "meaning": "Reference sampling step; elapsed time is measured in these units.",
+    "effect": "Must equal the real cadence, otherwise every rate is mis-scaled.",
+    "how": "Median gap between readings inside a segment = 10 min."
+   },
+   {
+    "knob": "n_harmonics",
+    "value": 3,
+    "kind": "derived",
+    "meaning": "Number of 24 h Fourier harmonics in the circadian term.",
+    "effect": "More: sharper daily shape, more parameters to learn per segment.",
+    "how": "Harmonic h kept if significant (p<0.05, autocorrelation-corrected F test) in >= 50% of patients: share significant {'1': 0.88, '2': 0.8, '3': 0.71}; 1-3 tested."
+   },
+   {
+    "knob": "period_min",
+    "value": 1440.0,
+    "kind": "physiology",
+    "meaning": "Length of the circadian cycle.",
+    "effect": "Fixed by biology.",
+    "how": "24 h."
+   },
+   {
+    "knob": "deltrend",
+    "value": 0.5558,
+    "kind": "derived",
+    "meaning": "Discount on the level: how much past information is kept per step.",
+    "effect": "Closer to 1: stiffer, smoother level. Lower: follows changes faster.",
+    "how": "1 - A, A = steady-state gain for signal-to-noise q/R = 0.355 (level change per reading q = 2S(1-e^(-dt/tau)) = 0.0177, noise R = 0.0497, S = 0.137, tau = 150 min, log units)."
+   },
+   {
+    "knob": "delseas",
+    "value": 1.0,
+    "kind": "derived",
+    "meaning": "Discount on the circadian harmonics: how fast the daily shape may change.",
+    "effect": "1: shape fixed once learned. Lower: shape adapts within the day.",
+    "how": "1 - A for r = (day-to-day change of the harmonic coefficients / readings per day) / R = 0. Day-to-day change beyond estimation noise: 0/day (0 = not detectable)."
+   },
+   {
+    "knob": "r_scale",
+    "value": 0.9817,
+    "kind": "derived",
+    "meaning": "Multiplies the method's own noise estimate.",
+    "effect": "Higher: smoother.",
+    "how": "Median per patient of variogram noise R / the method's MAD noise."
+   },
+   {
+    "knob": "huber_delta",
+    "value": 1.345,
+    "kind": "convention",
+    "meaning": "Residual (in std) beyond which a reading is down-weighted.",
+    "effect": "Lower: more readings treated as outliers.",
+    "how": "Huber's 1.345: 95% efficiency when the noise is Gaussian."
+   },
+   {
+    "knob": "C0_var",
+    "value": 0.1365,
+    "kind": "derived",
+    "meaning": "Prior variance of the level at the start of each segment.",
+    "effect": "Higher: the first readings of a segment move the level more.",
+    "how": "The level's own variance S = 0.137 (log): how far it can be from the patient's median."
+   },
+   {
+    "knob": "C0_seas_var",
+    "value": [
+     0.01101,
+     0.006616,
+     0.002147
+    ],
+    "kind": "derived",
+    "meaning": "Prior variance of each circadian harmonic's two coefficients, per segment.",
+    "effect": "Higher: short segments can invent a large daily rhythm. The old value 1 let level and harmonics swing against each other (28% of outputs hit the range limits).",
+    "how": "amplitude^2 / 2 per harmonic (cos and sin share the amplitude), amplitudes 0.148 / 0.115 / 0.0655 (cohort median, log)."
+   },
+   {
+    "knob": "n_irls",
+    "value": 5,
+    "kind": "numerical",
+    "meaning": "IRLS iterations of the Huber solve.",
+    "effect": "Convergence only.",
+    "how": "Kept."
+   }
+  ],
+  "kim": [
+   {
+    "knob": "gap_threshold_min",
+    "value": 180.0,
+    "kind": "pipeline",
+    "meaning": "A gap at least this long splits the recording; the filter restarts.",
+    "effect": "Higher: smooths across longer voids. Lower: more, shorter segments.",
+    "how": "Shared H8 constant. In this cohort 99% of gaps inside a segment are <= 120 min and the gap histogram has no natural break, so the data do not argue for moving it."
+   },
+   {
+    "knob": "min_segment_rows",
+    "value": 10,
+    "kind": "pipeline",
+    "meaning": "Segments with fewer readings are left unsmoothed.",
+    "effect": "Higher: fewer, more reliable estimates. Lower: smooths tiny fragments.",
+    "how": "Shared constant. 94.9% of readings sit in segments of >= 10."
+   },
+   {
+    "knob": "phi",
+    "value": 0.9353,
+    "kind": "derived",
+    "meaning": "Retention of the level toward its regime mean per reading.",
+    "effect": "Higher: level wanders longer before returning.",
+    "how": "exp(-dt / tau) = exp(-10/150)."
+   },
+   {
+    "knob": "stickiness",
+    "value": 0.9353,
+    "kind": "derived",
+    "meaning": "Probability of staying in the same HRV regime at the next reading.",
+    "effect": "Higher: regimes persist longer.",
+    "how": "Same correlation time as the level: exp(-dt / tau)."
+   },
+   {
+    "knob": "q_scale",
+    "value": 0.301,
+    "kind": "derived",
+    "meaning": "Process noise as a multiple of the method's MAD noise.",
+    "effect": "Higher: follows the signal more closely.",
+    "how": "Median per patient of the AR(1) innovation variance S(1-phi^2) / MAD noise."
+   },
+   {
+    "knob": "r_scale",
+    "value": 0.9817,
+    "kind": "derived",
+    "meaning": "Observation noise as a multiple of the method's MAD noise.",
+    "effect": "Higher: smoother.",
+    "how": "Median per patient of variogram R / MAD noise."
+   },
+   {
+    "knob": "var_ratio",
+    "value": 0.2619,
+    "kind": "derived",
+    "meaning": "Noise in the high-HRV regime relative to the low one.",
+    "effect": "Only shifts how noisy each regime is assumed to be.",
+    "how": "Median per patient of the robust noise of readings above vs below the patient's median (low values reflect the device cap compressing high HRV)."
+   }
+  ],
+  "krlst": [
+   {
+    "knob": "gap_threshold_min",
+    "value": 180.0,
+    "kind": "pipeline",
+    "meaning": "A gap at least this long splits the recording; the filter restarts.",
+    "effect": "Higher: smooths across longer voids. Lower: more, shorter segments.",
+    "how": "Shared H8 constant. In this cohort 99% of gaps inside a segment are <= 120 min and the gap histogram has no natural break, so the data do not argue for moving it."
+   },
+   {
+    "knob": "min_segment_rows",
+    "value": 10,
+    "kind": "pipeline",
+    "meaning": "Segments with fewer readings are left unsmoothed.",
+    "effect": "Higher: fewer, more reliable estimates. Lower: smooths tiny fragments.",
+    "how": "Shared constant. 94.9% of readings sit in segments of >= 10."
+   },
+   {
+    "knob": "lengthscale_min",
+    "value": 105.8,
+    "kind": "derived",
+    "meaning": "RBF kernel lengthscale in minutes: how far apart readings still inform each other.",
+    "effect": "Longer: smoother.",
+    "how": "tau / sqrt(2): an RBF kernel's correlation reaches 1/e at sqrt(2) lengthscales; tau = 150 min."
+   },
+   {
+    "knob": "c",
+    "value": 0.4218,
+    "kind": "derived",
+    "meaning": "Noise-to-signal ratio.",
+    "effect": "Higher: smoother.",
+    "how": "Median per patient of R / S."
+   },
+   {
+    "knob": "forgetting_lambda",
+    "value": 0.9901,
+    "kind": "derived",
+    "meaning": "Per-reading forgetting; < 1 lets the tracker follow a drifting baseline.",
+    "effect": "Lower: forgets faster.",
+    "how": "exp(-dt / tau_day), tau_day = 1009 min."
+   },
+   {
+    "knob": "budget",
+    "value": 32,
+    "kind": "derived",
+    "meaning": "Dictionary size: past readings the tracker keeps.",
+    "effect": "Larger: more memory, cost grows as size^2.",
+    "how": "Readings within 3 lengthscales (older ones weigh < 1%): ceil(3 l / dt)."
+   },
+   {
+    "knob": "forgetmode / jitter",
+    "value": [
+     "B2P",
+     1e-06
+    ],
+    "kind": "numerical",
+    "meaning": "Forgetting scheme (back-to-prior, the authors' recommendation), Gram regulariser.",
+    "effect": "Stability only.",
+    "how": "Kept."
+   }
+  ],
+  "logmhw": [
+   {
+    "knob": "gap_threshold_min",
+    "value": 180.0,
+    "kind": "pipeline",
+    "meaning": "A gap at least this long splits the recording; the filter restarts.",
+    "effect": "Higher: smooths across longer voids. Lower: more, shorter segments.",
+    "how": "Shared H8 constant. In this cohort 99% of gaps inside a segment are <= 120 min and the gap histogram has no natural break, so the data do not argue for moving it."
+   },
+   {
+    "knob": "min_segment_rows",
+    "value": 10,
+    "kind": "pipeline",
+    "meaning": "Segments with fewer readings are left unsmoothed.",
+    "effect": "Higher: fewer, more reliable estimates. Lower: smooths tiny fragments.",
+    "how": "Shared constant. 94.9% of readings sit in segments of >= 10."
+   },
+   {
+    "knob": "ref_dt_min",
+    "value": 10.0,
+    "kind": "derived",
+    "meaning": "Reference sampling step; elapsed time is measured in these units.",
+    "effect": "Must equal the real cadence, otherwise every rate is mis-scaled.",
+    "how": "Median gap between readings inside a segment = 10 min."
+   },
+   {
+    "knob": "optimize",
+    "value": false,
+    "kind": "structural",
+    "meaning": "If True, alpha/beta/phi are fitted per patient (statsmodels MLE).",
+    "effect": "True = per-patient settings; reserved for the per-patient experiment.",
+    "how": "Off: this run uses the cohort value of the same MLE."
+   },
+   {
+    "knob": "alpha",
+    "value": 0.142,
+    "kind": "derived",
+    "meaning": "Level smoothing weight of each new reading.",
+    "effect": "Lower: smoother.",
+    "how": "Median per patient of the damped-Holt MLE on the deseasonalised longest segment (the method's own optimiser). Cross-check, variogram gain A = 0.444."
+   },
+   {
+    "knob": "beta",
+    "value": 0.0,
+    "kind": "derived",
+    "meaning": "Trend smoothing weight.",
+    "effect": "Higher: trend reacts faster.",
+    "how": "Median per patient of the same MLE (0 = no trend needed)."
+   },
+   {
+    "knob": "phi",
+    "value": 0.8912,
+    "kind": "derived",
+    "meaning": "Trend damping per reading.",
+    "effect": "Lower: trend dies out faster.",
+    "how": "Median per patient of the same MLE."
+   },
+   {
+    "knob": "gamma",
+    "value": 0.0,
+    "kind": "derived",
+    "meaning": "Weight of a new reading on its time-of-day seasonal value.",
+    "effect": "0: daily profile fixed. Higher: profile adapts.",
+    "how": "Each time-of-day bucket is updated once a day, so gain A for r = day-to-day change / R = 0."
+   },
+   {
+    "knob": "buckets_per_day",
+    "value": 144,
+    "kind": "derived",
+    "meaning": "Time-of-day buckets for the seasonal profile.",
+    "effect": "One per reading slot.",
+    "how": "1440 / dt = 144."
+   }
+  ],
+  "ossa": [
+   {
+    "knob": "gap_threshold_min",
+    "value": 180.0,
+    "kind": "pipeline",
+    "meaning": "A gap at least this long splits the recording; the filter restarts.",
+    "effect": "Higher: smooths across longer voids. Lower: more, shorter segments.",
+    "how": "Shared H8 constant. In this cohort 99% of gaps inside a segment are <= 120 min and the gap histogram has no natural break, so the data do not argue for moving it."
+   },
+   {
+    "knob": "min_segment_rows",
+    "value": 10,
+    "kind": "pipeline",
+    "meaning": "Segments with fewer readings are left unsmoothed.",
+    "effect": "Higher: fewer, more reliable estimates. Lower: smooths tiny fragments.",
+    "how": "Shared constant. 94.9% of readings sit in segments of >= 10."
+   },
+   {
+    "knob": "window_max",
+    "value": 144,
+    "kind": "derived",
+    "meaning": "Longest trailing window (readings) the SVD looks at.",
+    "effect": "Longer: slower patterns resolved, more lag after a change.",
+    "how": "One day of readings (1440 / dt), the longest physiological cycle. Note half of segments are <= 11 readings, so the window is usually the whole segment so far."
+   },
+   {
+    "knob": "n_components",
+    "value": 8,
+    "kind": "derived",
+    "meaning": "Leading singular components kept as signal.",
+    "effect": "Fewer: smoother.",
+    "how": "Median per patient of the Gavish-Donoho optimal rank (known noise = variogram R) of one-day Hankel windows."
+   },
+   {
+    "knob": "l_frac",
+    "value": 0.5,
+    "kind": "convention",
+    "meaning": "Embedding dimension as a fraction of the window.",
+    "effect": "-",
+    "how": "L = N/2 (Golyandina & Zhigljavsky)."
+   },
+   {
+    "knob": "min_window",
+    "value": 8,
+    "kind": "numerical",
+    "meaning": "Below this many readings, emit a trailing mean.",
+    "effect": "Warm-up only.",
+    "how": "Kept."
+   }
+  ],
+  "rspf": [
+   {
+    "knob": "gap_threshold_min",
+    "value": 180.0,
+    "kind": "pipeline",
+    "meaning": "A gap at least this long splits the recording; the filter restarts.",
+    "effect": "Higher: smooths across longer voids. Lower: more, shorter segments.",
+    "how": "Shared H8 constant. In this cohort 99% of gaps inside a segment are <= 120 min and the gap histogram has no natural break, so the data do not argue for moving it."
+   },
+   {
+    "knob": "min_segment_rows",
+    "value": 10,
+    "kind": "pipeline",
+    "meaning": "Segments with fewer readings are left unsmoothed.",
+    "effect": "Higher: fewer, more reliable estimates. Lower: smooths tiny fragments.",
+    "how": "Shared constant. 94.9% of readings sit in segments of >= 10."
+   },
+   {
+    "knob": "K",
+    "value": 3,
+    "kind": "derived",
+    "meaning": "Number of HRV regimes.",
+    "effect": "More: more baseline levels to switch between.",
+    "how": "Activity states (sleep / rest / active, from the watch) whose HRV differs across patients (paired Wilcoxon, Bonferroni): sleep_vs_rest p=1.8e-07, rest_vs_active p=6.3e-06, sleep_vs_active p=7e-06"
+   },
+   {
+    "knob": "stickiness",
+    "value": 0.9052,
+    "kind": "derived",
+    "meaning": "Probability of staying in the same regime at the next reading.",
+    "effect": "Higher: regimes persist longer.",
+    "how": "exp(-dt / tau), logit tau = 100 min."
+   },
+   {
+    "knob": "reversion_tau_min",
+    "value": 100.4,
+    "kind": "derived",
+    "meaning": "Minutes for the level to revert to its regime mean.",
+    "effect": "Longer: stiffer level.",
+    "how": "Variogram correlation time in logit space."
+   },
+   {
+    "knob": "sigma_level_frac",
+    "value": 0.2902,
+    "kind": "derived",
+    "meaning": "Level shock per 10 min, as a fraction of the patient's spread.",
+    "effect": "Lower: smoother.",
+    "how": "Median per patient of sqrt(S(1-phi^2)) / spread (logit units)."
+   },
+   {
+    "knob": "sigma_seas",
+    "value": 0.0,
+    "kind": "derived",
+    "meaning": "Per-step drift of the circadian coefficients.",
+    "effect": "0: rhythm fixed.",
+    "how": "sqrt(day-to-day change of the harmonic coefficients / readings per day)."
+   },
+   {
+    "knob": "circ_init_frac",
+    "value": 0.3103,
+    "kind": "derived",
+    "meaning": "Starting circadian amplitude relative to the spread.",
+    "effect": "Prior only.",
+    "how": "Median per patient of first-harmonic amplitude / spread."
+   },
+   {
+    "knob": "n_particles / seed",
+    "value": [
+     500,
+     0
+    ],
+    "kind": "numerical",
+    "meaning": "Monte Carlo particles, RNG seed.",
+    "effect": "More: less Monte Carlo noise, slower.",
+    "how": "Kept."
+   },
+   {
+    "knob": "min_obs_sigma / min_logit_spread",
+    "value": [
+     1.0,
+     0.2
+    ],
+    "kind": "numerical",
+    "meaning": "Floors.",
+    "effect": "Guards only.",
+    "how": "Kept."
+   }
+  ]
+ }
+}
