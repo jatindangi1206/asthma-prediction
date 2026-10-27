@@ -220,15 +220,20 @@ const cache = {};
 let current = null;
 window.__patient = d => { cache[d.id] = d; if (d.id === pending) { current = d; drawPatient(); } };
 let pending = null;
+function plotMessage(text) {
+  const el = document.getElementById("pplot");
+  Plotly.purge(el);
+  el.innerHTML = '<div class="loading">' + text + '</div>';
+}
 function loadPatient(id) {
   if (!id) return;
   store.set("patient", id);
   pending = id;
   if (cache[id]) { current = cache[id]; drawPatient(); return; }
-  document.getElementById("pplot").innerHTML = '<div class="loading">Loading ' + id + '…</div>';
+  plotMessage("Loading " + id + "…");
   const s = document.createElement("script");
   s.src = "patients/" + encodeURIComponent(id) + ".js";
-  s.onerror = () => document.getElementById("pplot").innerHTML = '<div class="loading">No data file for ' + id + '</div>';
+  s.onerror = () => plotMessage("No data file for " + id);
   document.body.appendChild(s);
 }
 
@@ -282,8 +287,9 @@ function drawPatient() {
     yaxis2: { title: "residual", gridcolor: grid, domain: [0, 0.3], visible: showRes, zeroline: true, zerolinecolor: ink },
   };
   const el = document.getElementById("pplot");
+  Plotly.purge(el);   // wiping innerHTML alone leaves Plotly's state behind and the next draw renders blank
   el.innerHTML = "";
-  Plotly.react(el, traces, layout, { responsive: true, displaylogo: false });
+  Plotly.newPlot(el, traces, layout, { responsive: true, displaylogo: false });
   patientTable(d.id);
 }
 
