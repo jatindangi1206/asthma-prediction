@@ -12,6 +12,7 @@ whether to run on raw, smoothed or residual.
 from __future__ import annotations
 
 import concurrent.futures
+import hashlib
 import multiprocessing
 import warnings
 from pathlib import Path
@@ -69,13 +70,19 @@ def _one(args):
 
 
 def run(method: str, source_artifact=None, force: bool = False,
-        workers: int | None = None, limit: int | None = None, **overrides):
+        workers: int | None = None, limit: int | None = None,
+        patients: list[str] | None = None, **overrides):
     """`limit` caps the number of patients (first N by id) — for quick sweeps. It is
-    part of the cache key, so a 20-patient run is never reused as a full-cohort one."""
+    part of the cache key, so a 20-patient run is never reused as a full-cohort one.
+    `patients` restricts the run to those ids (a cohort); its fingerprint is keyed too."""
     spec = registry.get("smoothing", method)
     params = spec.params(**overrides)
     if limit:
         params = {**params, "limit_patients": int(limit)}
+    if patients is not None:
+        ids = sorted(set(map(str, patients)))
+        params = {**params, "patients_sha": hashlib.sha256(",".join(ids).encode()).hexdigest()[:12],
+                  "n_patients_requested": len(ids)}
     inputs = [source_artifact.ref] if source_artifact is not None else [
         {"step": "ingest", "method": "processed_dir", "key": str(PROCESSED_DIR)}]
 
@@ -87,6 +94,8 @@ def run(method: str, source_artifact=None, force: bool = False,
             return hit
 
     files = sorted(PROCESSED_DIR.glob("*_processed.csv"))
+    if patients is not None:
+        files = [f for f in files if f.stem.replace("_processed", "") in set(ids)]
     if limit:
         files = files[:int(limit)]
     if not files:

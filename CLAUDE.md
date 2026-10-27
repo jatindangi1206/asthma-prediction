@@ -9,9 +9,10 @@ signals (10-min SDNN HRV from consumer smartwatches) into supervised early-warni
 signals for respiratory exacerbations. Asthma is the first study, not the repo's
 identity — the cohorts are AIIMS asthma adults/children, COPD and ACHE.
 
-`README.md` is the full manual and is the source of truth when it and this file
-disagree. **Run everything from the `asthma-prediction/` directory** — paths are
-relative.
+`README.md` is the full manual; where it, this file and the code disagree, the code
+wins (e.g. the README's `python -m wearable all ...` does not exist — see
+`wearable/__main__.py`). `main.tex` is the paper. **Run everything from the
+`asthma-prediction/` directory** — `config.DATA` is the relative `./data`.
 
 ## The five rules this repo is built around
 
@@ -25,7 +26,8 @@ assert them, and a PR that breaks one fails.
 3. **Every result records how it was made** — method, settings, input artifacts, code
    version — in a `manifest.json` beside it. Any result traces back to the raw signal.
 4. **The same computation is never run twice.** Artifacts are keyed on a content hash;
-   a matching key is reused. Editing a method invalidates only that method.
+   a matching key is reused. Editing a method invalidates only that method — but read
+   "What the cache key does not see" below before trusting a reuse.
 5. **A comparison varies only the method.** Same test participants, same model, same
    seed. The split is derived from the patient universe and the seed alone.
 
@@ -69,7 +71,7 @@ Flow (steps compose in any order; none is mandatory):
 
 ```
 data/raw/pass1/ or data/raw/spark/
-  └─ ingest  → data/processed/<pid>_processed.csv + data/labels_pass1.csv
+  └─ ingest  → data/processed/<pid>_processed.csv + data/processed/labels_pass1.csv
        ├─ smooth  <method>          → table `smoothed`  (adds residual_hrv)
        ├─ detect  --on raw|smoothed|residual → table `detected`
        └─ join    any artifacts + labels    → tables `train`, `test`
@@ -82,9 +84,15 @@ Everything from `smooth` on writes to `data/runs/<step>/<method>/<key>/`.
 ## Commands
 
 ```bash
-# .venv/bin/python directly — `source .venv/bin/activate` does not always take in a
-# non-interactive shell and falls back to a system python whose numpy is x86_64
-# (architecture ImportError on Apple Silicon).
+# Python 3.10 venv; `python` below means .venv/bin/python. Call it directly — `source
+# .venv/bin/activate` does not always take in a non-interactive shell, and any python
+# outside the venv breaks on numpy (x86_64 ImportError on Apple Silicon; "numpy.dtype
+# size changed" with anaconda's 3.12 on Linux).
+python3.10 -m venv .venv && .venv/bin/pip install -r requirements.txt
+# On the Linux workstation the system python3.10 has no ensurepip, so .venv is a conda
+# env (`conda create -p .venv python=3.10`), and ~/.local site-packages leak into it:
+# export PYTHONNOUSERSITE=1 before every install and run.
+
 python -m wearable list                   # every discovered method, with its defaults
 python -m wearable selftest               # assert the five rules; touches no data
 python -m wearable runs [step] [method]   # the artifact log
@@ -105,10 +113,50 @@ python -m wearable sweep smoothing            # every smoother + baseline, one m
 python -m wearable sweep cpd                  # every detector, same signal + model
 python -m wearable sweep signal               # one ensemble on raw vs smoothed vs residual
 python -m wearable sweep smoothers-no-model   # judge smoothers with no model at all
+python -m wearable sweep smoothing --limit 40 # first 40 patients; limit is in the key
 ```
 
-Tests: `python -m wearable selftest`. `pytest` is **not** in the venv; run
-`tests/test_smoke.py` functions directly if you need them without it.
+`smooth` and `sweep` take `--<knob> <value>` pairs parsed as Python literals and passed
+straight through as kwargs (so `--limit` works there; `chain` has no `--limit`).
+
+**Artifact specs** are `step:method[:key]` with the split at the *first* colon (method
+names contain colons: `join:smooth:gammadglm`, `evaluate:model:logreg`). Without a key
+the newest complete artifact of that name wins. Detect artifacts are named by the
+ensemble (`detect:bocpd+kcpd+kalman+hmm`), not by `--on`/`--smoothing`, so runs on
+different signals share a name — pass the key from `runs` when that matters.
+
+Tests: `python -m wearable selftest` (same checks as `tests/test_smoke.py`, readable
+output, no data needed). `pytest` is **not** in the venv; run one test
+directly:
+
+```bash
+.venv/bin/python -c "from tests.test_smoke import test_steps_do_not_import_each_other as t; t()"
+```
+
+**Smoothing study** (`scripts/smoothing_study.py stats|derive|run|report|all`): derives
+every smoother's settings from the cohort being smoothed (AIIMS, COPD, combined) via
+`wearable/cohort_stats.py` — a level-plus-white-noise variogram (R, S, tau), cadence,
+circadian, volatility and activity-state statistics — runs defaults vs derived, scores
+per patient, and writes `data/reports/smoothing/` (settings, metrics, `methods.html`,
+and `dashboard/index.html`, which loads `patients/<pid>.js` so it works from file://).
+`smooth.run(..., patients=[...])` restricts a run to a cohort; the id list is keyed.
+
+## What the cache key does not see
+
+`key = sha256(step, method, params, input keys, code_hash)`, where `code_hash` is the
+**method module's file hash** only. So a reuse can be stale when you change:
+
+- **step code** (`wearable/steps/*.py`), `chunking.py`, or constants in `config.py`
+  (`GAP_THRESHOLD_MIN`, `MIN_SEGMENT_ROWS`, …) — none are hashed. Every smoother imports
+  `chunking`/`config`, yet editing them invalidates nothing.
+- **join logic** — join's `code_hash` is the literal `"join1"`; bump it in
+  `steps/join.py` when join behaviour changes.
+- **ingest output** — smooth and `detect --on raw` key the ingest input as the *path
+  string* `data/processed`, and `labels_pass1.csv` is not keyed at all. Re-ingesting
+  does not invalidate anything downstream.
+
+In all three cases pass `--force` (it cascades through `chain`), or delete the stale
+`data/runs/<step>/` subtree.
 
 ## Adding things — one file each
 
@@ -126,7 +174,12 @@ Optional module attributes: `LABEL`, `DEFAULTS` (the knobs — these replaced th
 
 A module whose name starts with `_`, or which lacks the entry point, is skipped — so
 helpers can live in a pool directory. A method that fails to import is reported as
-unavailable rather than taking the registry down.
+unavailable rather than taking the registry down — but `selftest` fails on any
+unavailable method, so a new dependency must go in `requirements.txt`.
+
+A new smoother must emit a strictly positive baseline (H1, asserted). If it is
+truncation-exact (H9, below), add it to `TRUNCATION_EXACT` in `wearable/selftest.py`;
+selftest then fails if it ever regresses.
 
 ## Signal choice: raw, smoothed, or residual
 
@@ -178,24 +231,28 @@ window.
 ~every 10 min, device-capped at 129. 191 of 221 patients yield data (30 have heart rate
 but no surviving HRV); 11 of those have <144 valid samples so CPD never arms them.
 
-**Ground truth — `data/labels_pass1.csv`:** one row per patient-day, collapsed off the
+**Ground truth — `data/processed/labels_pass1.csv`** (`config.LABELS_CSV`): one row per patient-day, collapsed off the
 minute grid *before* HRV filtering, so an exacerbation day carrying no HRV is still on
 record. Counts reproduce `data/raw/pass1/README.md` §5 exactly: 15,691 sample days, 144
 exacerbation days, 151 onset days, 100 episodes. `data/raw/pass1/README.md` is
 authoritative for that cohort.
 
-**Current state: reset for a fresh run.** `data/{processed,runs,reports,logs}/` are
-empty; `data/raw/pass1/` is the only input. Everything from before is in `data/old/`
-(see `data/old/README.md`) and nothing reads it. The `spark` source is still registered
-but its export moved to `data/old/raw_spark/`, so it reports 0 patients.
+**`data/` is machine-local and may be absent entirely** (a fresh clone has none).
+`ingest` needs `data/raw/pass1/patients.csv` plus the per-cohort files; check with
+`ls data/` before assuming any state. After the last reset, `data/raw/pass1/` was the
+only input and everything earlier went to `data/old/` (see `data/old/README.md`), which
+nothing reads — except the pf row of `scripts/smoother_comparison_report.py`, via
+`config.smoothed_dir`. That script defaults to patient `0010`, a spark patient; pass a
+pass1 id. The `spark` source is still registered but its export moved to
+`data/old/raw_spark/`, so it reports 0 patients.
 
-Two things in `data/old/` are **not reproducible** by the current code: the stage-3a
-adaptive-baseline output (`calibrated_`/`annotated_gammadglm`, since 3a is unwired in
-`legacy/`) and the non-causal pf output (`pf_smoothed/`, since pf is not in the
-smoothing registry). Copy them back before deleting `data/old/`.
+Where `data/old/` exists, two things in it are **not reproducible** by the current
+code: the stage-3a adaptive-baseline output (`calibrated_`/`annotated_gammadglm`, since
+3a is unwired in `legacy/`) and the non-causal pf output (`pf_smoothed/`, since pf is
+not in the smoothing registry). Copy them back before deleting `data/old/`.
 
-**63 patient IDs collide between the two sources** (`a001`, `p017`, …). The old
-109-patient per-patient run sits in `data/*_legacy109/`.
+**63 patient IDs collide between the two sources** (`a001`, `p017`, …) — never mix
+spark and pass1 output in one `data/processed/`.
 
 **HRV data is sensitive — never commit anything under `data/` — raw cohorts, the artifact store, or any
 patient CSVs to a public remote.**
@@ -203,7 +260,9 @@ patient CSVs to a public remote.**
 ## Conventions
 
 - Never redefine `GAP_THRESHOLD_MIN` or `assign_chunks`; import them. Tests enforce it.
-- Never import one step from another. Compose in `experiment.py`.
+- Never import one step from another. Compose in `experiment.py`. The one allowed
+  exception, pinned by the test: `join` imports `detect._load_input` for the raw-only
+  baseline. `scripts/` may import anything (`plot_patient.py` uses `__main__._resolve`).
 - Prefer data-driven per-patient priors over hard-coded scales (H10).
 - Determinism: `kcpd` seeds `np.random.default_rng(0)`, `hmm` uses `random_state=42`,
   models take an explicit seed. Given identical inputs, outputs are byte-reproducible —

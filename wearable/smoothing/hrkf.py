@@ -64,7 +64,8 @@ class HRKFConfig:
     r_scale: float = 1.0          # multiplies the data-derived measurement variance
     n_irls: int = 5               # IRLS iterations for the Huber solve
     ref_dt_min: float = 10.0
-    C0_var: float = 1.0
+    C0_var: float = 1.0               # prior state variance (level; harmonics too if below is None)
+    C0_seas_var: tuple | None = None  # prior variance of each harmonic's coefficients, one per harmonic
 
 
 # ==============================================================================
@@ -180,7 +181,11 @@ def smooth_dataframe(df, patient_col="patient_id", timestamp_col="timestamp",
         R = max((1.4826 * np.median(np.abs(dz - np.median(dz))) / np.sqrt(2)) ** 2, 1e-4) * cfg.r_scale
 
         m0 = np.zeros(kf.p); m0[0] = log_med
-        C0 = np.eye(kf.p) * cfg.C0_var
+        C0 = np.full(kf.p, cfg.C0_var)
+        if cfg.C0_seas_var is not None:
+            for j, v in enumerate(cfg.C0_seas_var[:cfg.n_harmonics]):
+                C0[1 + 2 * j] = C0[2 + 2 * j] = v
+        C0 = np.diag(C0)
 
         res = np.full(hrv.shape, np.nan)
         for c in np.unique(cid):

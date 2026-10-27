@@ -79,7 +79,8 @@ class GammaDGLMConfig:
     q_floor: float = 1e-6
     q_cap: float = 5.0            # cap on prior linear-predictor variance (PyBATS safety)
     ref_dt_min: float = 10.0      # reference sampling step for dt-scaling (H7)
-    C0_var: float = 1.0           # diffuse prior state variance
+    C0_var: float = 1.0           # diffuse prior state variance (level; harmonics too if below is None)
+    C0_seas_var: tuple | None = None  # prior variance of each harmonic's coefficients, one per harmonic
 
 
 # ==============================================================================
@@ -96,7 +97,7 @@ class GammaDGLM:
         self._build_components()
         self.shape = self.cfg.shape if self.cfg.shape is not None else 10.0
         self.m0 = np.zeros(self.p)
-        self.C0 = np.eye(self.p) * self.cfg.C0_var
+        self.C0 = self._prior_cov()
         self.loglik_ = np.nan
         self._store = None     # filter trace (for smoothing / forecasting)
 
@@ -116,6 +117,16 @@ class GammaDGLM:
             self.omega[j] = 2 * np.pi * (j + 1) / cfg.period_min   # per-minute (H7)
         self.F = F
         self.disc = disc
+
+    def _prior_cov(self):
+        """Diagonal prior: C0_var on every state, or C0_var on the level and C0_seas_var[h]
+        on harmonic h's two coefficients. A prior far wider than the true amplitudes lets
+        a short segment push level and harmonics against each other."""
+        d = np.full(self.p, self.cfg.C0_var)
+        if self.cfg.C0_seas_var is not None:
+            for j, v in enumerate(self.cfg.C0_seas_var[:self.cfg.n_harmonics]):
+                d[1 + 2 * j] = d[2 + 2 * j] = v
+        return np.diag(d)
 
     def _G(self, dt):
         """Evolution matrix: identity level + harmonic rotations by omega*dt (H7)."""
@@ -194,7 +205,7 @@ class GammaDGLM:
             self.shape = float(np.clip(med ** 2 / noise, 1.0, 1e4)) * self.cfg.shape_scale
         self.m0 = np.zeros(self.p)
         self.m0[0] = -np.log(float(np.median(yv)))     # level ~ -log mu
-        self.C0 = np.eye(self.p) * self.cfg.C0_var
+        self.C0 = self._prior_cov()
         self._ylo, self._yhi = float(yv.min()), float(yv.max())
         return self
 
