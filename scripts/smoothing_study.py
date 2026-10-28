@@ -466,12 +466,12 @@ def cmd_run() -> None:
     print(f"-> {OUT}/metrics_per_patient.csv, metrics_summary.csv, runs.csv")
 
 
-def summarise_metrics(per: pd.DataFrame) -> pd.DataFrame:
+def summarise_metrics(per: pd.DataFrame, names: list[str] | None = None) -> pd.DataFrame:
     """Median (and IQR) across patients, for each method x setting x group of patients.
     'setting' says where the settings came from: default, derived on own cohort, or
     derived on the combined cohort."""
     from wearable import metrics
-    names = metrics.names("signal")
+    names = names or metrics.names("signal")
     groups = {"aiims": per["cohort"] == "aiims", "copd": per["cohort"] == "copd",
               "aiims_adult": per["group"] == "aiims_adult", "aiims_paed": per["group"] == "aiims_paed",
               "combined": per["cohort"].notna(), "exacerbation_patients": per["has_exac"]}
@@ -533,6 +533,31 @@ def _clean(x):
     if isinstance(x, np.integer):
         return int(x)
     return x
+
+
+ABSOLUTE = ["var_raw", "var_sm", "rough_raw", "rough_sm", "mean_raw", "mean_sm",
+            "peak_raw", "peak_sm", "std_raw", "resid_std"]
+
+
+def _absolute(raw, smoothed) -> dict:
+    """The raw and smoothed quantities behind the % metrics, in raw HRV units (variance squared), on
+    the same rows the metrics use. peak_*: median excursion over the raw peaks that
+    peak_preservation scores, in each signal."""
+    from scipy.signal import find_peaks
+    from wearable.metrics.peak_preservation import WINDOW
+    raw, sm = np.asarray(raw, dtype=float), np.asarray(smoothed, dtype=float)
+    m = np.isfinite(raw) & np.isfinite(sm)
+    if m.sum() < 3:
+        return {}
+    raw, sm = raw[m], sm[m]
+    peaks, _ = find_peaks(raw, prominence=0.5 * np.std(raw))
+    win = [slice(max(0, p - WINDOW), p + WINDOW + 1) for p in peaks]
+    return {"var_raw": np.var(raw), "var_sm": np.var(sm),
+            "rough_raw": np.mean(np.abs(np.diff(raw))), "rough_sm": np.mean(np.abs(np.diff(sm))),
+            "mean_raw": np.mean(raw), "mean_sm": np.mean(sm),
+            "peak_raw": np.median([raw[p] - raw[w].min() for p, w in zip(peaks, win)]) if len(peaks) else np.nan,
+            "peak_sm": np.median([sm[p] - sm[w].min() for p, w in zip(peaks, win)]) if len(peaks) else np.nan,
+            "std_raw": np.std(raw), "resid_std": np.std(raw - sm)}
 
 
 def ideal_reference(c: dict, n: int = 50000, seed: int = 0) -> dict:
@@ -614,6 +639,15 @@ def cmd_report() -> None:
         s = _setting_of(r["variant"], r["run_cohort"], r["cohort"])
         if s:
             pp.setdefault(r["p_id"], {}).setdefault(r["method"], {})[s] = {m: r[m] for m in mnames}
+    absolute = pd.DataFrame([{"method": method, "variant": variant, "run_cohort": rc, "p_id": pid,
+                              **_absolute(g["hrvValue"], g["smoothed_hrv"])}
+                             for (method, variant, rc), by_p in tables.items() for pid, g in by_p.items()] +
+                            # raw alone, on every reading, once per run so it slices like the smoothers
+                            [{"method": "raw", "variant": variant, "run_cohort": rc, "p_id": pid,
+                              **_absolute(g["hrvValue"], g["hrvValue"])}
+                             for (method, variant, rc), by_p in tables.items() if method == methods[0]
+                             for pid, g in by_p.items()])
+    absolute = absolute.merge(info[["cohort", "group", "has_exac"]], left_on="p_id", right_index=True)
     first = tables[next(iter(tables))]
     patients = [{"id": pid, "cohort": row["cohort"], "group": row["group"],
                  "n": int(len(first[pid])) if pid in first else 0,
@@ -626,6 +660,7 @@ def cmd_report() -> None:
              "hib": metrics.higher_is_better(n)} for n in mnames]
     labels = {m: registry.get("smoothing", m).label for m in methods}
     out = {"patients": patients, "perPatient": pp, "summary": summary.to_dict("records"),
+           "absolute": summarise_metrics(absolute, ABSOLUTE).to_dict("records"),
            "metrics": meta, "methods": [{"key": m, "label": labels[m], "trunc": TRUNCATION_DEV.get(m)} for m in methods],
            "settingLabels": SETTING_LABEL, "reference": ref, "cohortStats": cstats, "overview": _overview(info),
            "runs": runs_df.to_dict("records")}
