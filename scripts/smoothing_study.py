@@ -503,8 +503,8 @@ def summarise_metrics(per: pd.DataFrame) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 HERE = Path(__file__).resolve().parent
 DASH = OUT / "dashboard"
-SETTING_LABEL = {"default": "Default (registry)", "own": "Derived (own cohort)",
-                 "combined": "Derived (combined cohort)"}
+SETTING_LABEL = {"default": "Default settings", "own": "Derived from own cohort",
+                 "combined": "Derived from AIIMS + COPD"}
 TRUNCATION_DEV = {"anrewma": 0.0, "ctimm": 0.0, "hrkf": 0.002, "gammadglm": 0.052,
                   "ossa": 0.111, "kim": 0.122, "krlst": 0.135, "gpssm": 0.172,
                   "rspf": 0.388, "logmhw": 0.479}       # from `wearable selftest`
@@ -627,7 +627,7 @@ def cmd_report() -> None:
     labels = {m: registry.get("smoothing", m).label for m in methods}
     out = {"patients": patients, "perPatient": pp, "summary": summary.to_dict("records"),
            "metrics": meta, "methods": [{"key": m, "label": labels[m], "trunc": TRUNCATION_DEV.get(m)} for m in methods],
-           "settingLabels": SETTING_LABEL, "reference": ref, "cohortStats": cstats,
+           "settingLabels": SETTING_LABEL, "reference": ref, "cohortStats": cstats, "overview": _overview(info),
            "runs": runs_df.to_dict("records")}
     (DASH / "summary.js").write_text(f"window.__summary = {_js(_clean(out))};")
     shutil.copy(HERE / "smoothing_dashboard.html", DASH / "index.html")
@@ -636,9 +636,51 @@ def cmd_report() -> None:
     payload = {"settings": settings, "cohortStats": {c: {k: v for k, v in s.items() if not k.endswith("__n")}
                                                      for c, s in cstats.items()},
                "labels": labels, "trunc": TRUNCATION_DEV,
-               "defaults": {m: _config_defaults(m) for m in methods}}
+               "defaults": {m: _config_defaults(m) for m in methods},
+               "distance": _distances(summary, ref)}
     (OUT / "methods.html").write_text(page.replace("/*__DATA__*/null", _js(_clean(payload))))
     print(f"dashboard -> {DASH / 'index.html'}\nmethods   -> {OUT / 'methods.html'}")
+
+
+def _overview(info: pd.DataFrame) -> dict:
+    """Participant counts and the segmentation numbers behind the Data tab's flow chart,
+    per group and in total. Segments are cut on observed readings, as the smoothers do."""
+    from wearable.chunking import assign_chunks
+    from wearable.config import MIN_SEGMENT_ROWS
+    idx = pd.read_csv(PASS1 / "patients.csv", dtype=str)
+    idx = idx[idx["in_models"] == "1"].set_index("p_id")
+    seg = {}
+    for pid in info.index:
+        df = pd.read_csv(PROCESSED_DIR / f"{pid}_processed.csv", parse_dates=["createdTime"])
+        df = df[df["hrvValue"].notna()].assign(patient_id=pid)
+        n = assign_chunks(df, "createdTime", "patient_id").groupby("chunk_id").size()
+        seg[pid] = (len(df), len(n), int(n[n >= MIN_SEGMENT_ROWS].sum()))
+    out = {}
+    for g in ("aiims_adult", "aiims_paed", "copd", "all"):
+        ids = idx.index if g == "all" else idx.index[idx["group"] == g]
+        hrv = [p for p in ids if p in seg]
+        sm = [p for p in hrv if seg[p][2] > 0]
+        ex = [p for p in sm if info.at[p, "has_exac"]]
+        out[g] = {"participants": len(ids), "with_hrv": len(hrv), "smoothed": len(sm), "with_exac": len(ex),
+                  "exac_days": int(sum(len(info.at[p, "exac_days"]) for p in ex)),
+                  "readings": sum(seg[p][0] for p in hrv), "segments": sum(seg[p][1] for p in hrv),
+                  "kept": sum(seg[p][2] for p in hrv),
+                  "days_median": float(pd.to_numeric(idx.loc[hrv, "hrv_days"]).median())}
+    return out
+
+
+def _distances(summary: pd.DataFrame, ref: dict) -> dict:
+    """{cohort: {method: {default, derived}}}: mean |gap| to the ideal causal filter over the
+    four shape metrics on a 0-1 scale (same formula as the dashboard's cohort tab)."""
+    scale = {"variance_reduction": 100, "roughness_reduction": 100, "peak_preservation": 1, "correlation": 1}
+    out: dict = {}
+    for c in ("aiims", "copd", "combined"):
+        ideal = ref[c]["ideal"]
+        for setting, col in (("default", "default"), ("derived_combined" if c == "combined" else "derived_own", "derived")):
+            for _, r in summary[(summary["patients"] == c) & (summary["setting"] == setting)].iterrows():
+                d = sum(abs(r[k] - ideal[k]) / s for k, s in scale.items()) / len(scale)
+                out.setdefault(c, {}).setdefault(r["method"], {})[col] = round(float(d), 3)
+    return out
 
 
 def _config_defaults(method: str) -> dict:

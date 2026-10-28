@@ -43,7 +43,7 @@ wearable/
   smoothing/       10 methods        smooth_dataframe(...)
   cpd/             4 methods         detect(time, values, priors)
   models/          1 model           fit(...) + predict_proba(...)
-  metrics/         8 metrics         compute(...) + KIND
+  metrics/         9 metrics         compute(...) + KIND
   steps/           ingest · smooth · detect · join · model · evaluate
   experiment.py    the ONLY thing that connects steps: chain() and the sweeps
   selftest.py      asserts the five rules

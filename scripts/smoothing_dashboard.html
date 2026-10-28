@@ -62,6 +62,23 @@ tr.ref td { color: var(--muted); font-style: italic; }
 .iqr { color: var(--muted); font-size: 11px; }
 .grid5 { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; margin-top: 12px; }
 .grid5 > div { height: 330px; }
+.pad { padding: 16px 20px 32px; }
+section.sub { padding: 0; }
+section.stack > .panel + .panel { margin-top: 16px; }
+.flow { display: flex; flex-direction: column; max-width: 860px; margin: 6px auto 0; }
+.step { display: grid; grid-template-columns: 30px 1fr minmax(170px, auto); gap: 12px; align-items: start;
+        border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; background: var(--bg); }
+.step .n { width: 26px; height: 26px; border-radius: 50%; background: var(--accent); color: var(--accent-ink);
+           display: grid; place-items: center; font-weight: 700; font-size: 13px; }
+.step h4 { margin: 2px 0 3px; font-size: 15px; }
+.step p { margin: 0; color: var(--muted); font-size: 13px; }
+.step .count { text-align: right; font-weight: 600; font-size: 15px; font-variant-numeric: tabular-nums; }
+.step .count small { display: block; color: var(--muted); font-weight: 400; font-size: 12px; }
+.arrow { text-align: center; color: var(--muted); font-size: 18px; line-height: 1; padding: 3px 0; }
+@media (max-width: 600px) { .step { grid-template-columns: 30px 1fr; } .step .count { grid-column: 2; text-align: left; } }
+table.defs td { white-space: normal; text-align: left; vertical-align: top; }
+table.defs td:first-child { white-space: nowrap; font-weight: 600; }
+table.defs td.f { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; min-width: 260px; }
 .note { color: var(--muted); font-size: 13px; max-width: 900px; }
 .loading { color: var(--muted); padding: 40px; text-align: center; }
 </style>
@@ -76,12 +93,12 @@ tr.ref td { color: var(--muted); font-style: italic; }
 </header>
 <nav>
   <button data-tab="patient" class="on">Patient</button>
+  <button data-tab="metrics">Metrics</button>
   <button data-tab="cohort">Cohort comparison</button>
   <button data-tab="data">Data characteristics</button>
 </nav>
 
-<section id="tab-patient" class="on">
-  <div class="layout">
+<div id="pmwrap" class="layout pad">
     <div class="panel">
       <div class="ctl"><h3>Cohort</h3>
         <select id="cohort"><option value="all">AIIMS + COPD</option><option value="aiims">AIIMS</option><option value="copd">COPD</option></select>
@@ -103,14 +120,33 @@ tr.ref td { color: var(--muted); font-style: italic; }
         <label class="row"><input type="checkbox" id="showexac" checked> Shade exacerbation days</label>
       </div>
     </div>
-    <div class="panel">
+    <div>
+    <section id="tab-patient" class="sub on"><div class="panel">
       <p class="meta" id="pmeta"></p>
       <div id="pplot" class="plot"><div class="loading">Select a patient</div></div>
       <h3 style="margin-top:12px">Signal metrics for this patient</h3>
       <div class="tablewrap"><table id="ptable"></table></div>
-      <p class="note">Drag on the chart to zoom, double-click to reset. Lines break at gaps of ≥ 180 min, where every
-        smoother restarts. Segments shorter than 10 readings are not smoothed.</p>
+      <p class="note">Drag to move along time, scroll to zoom in or out, or use the 1 day / 3 days / 1 week / all
+        buttons; double-click resets. The view stays put while you change methods or settings. Lines break at gaps of
+        ≥ 3 h, where every smoother restarts; segments shorter than 10 readings are not smoothed.</p>
+    </div></section>
+
     </div>
+</div>
+
+<section id="tab-metrics" class="stack">
+  <div class="panel">
+    <h3>What each metric measures</h3>
+    <div class="tablewrap"><table id="mdefs" class="defs"></table></div>
+    <p class="note">Variance ↓ and roughness ↓ reward removing variation; peak score and correlation reward keeping it.
+      A good smoother sits in between, close to the ideal filter row below.</p>
+  </div>
+  <div class="panel">
+    <div style="display:flex;gap:24px;flex-wrap:wrap;align-items:flex-end">
+      <div style="min-width:240px"><h3>Patients</h3><select id="mgroup"></select></div>
+    </div>
+    <p class="note" id="mnote"></p>
+    <div class="tablewrap"><table id="mtable"></table></div>
   </div>
 </section>
 
@@ -128,11 +164,12 @@ tr.ref td { color: var(--muted); font-style: italic; }
 
 <section id="tab-data">
   <div class="panel">
-    <p class="note">What each cohort's HRV looks like. These numbers are what the derived settings are
-      computed from (median across patients unless noted). The model behind them: a reading = a slowly
-      wandering level + white noise; a good smoother recovers the level.</p>
+    <h3>Participants</h3>
     <div class="tablewrap"><table id="dtable"></table></div>
-    <div class="grid5"><div id="gapplot"></div><div id="chunkplot"></div></div>
+  </div>
+  <div class="panel" style="margin-top:16px">
+    <h3>From watch to smoothed signal</h3>
+    <div class="flow" id="flow"></div>
   </div>
 </section>
 
@@ -143,19 +180,32 @@ const DASHES = { own: "solid", combined: "dash", default: "dot" };
 const SW = { own: "", combined: "dash", default: "dot" };
 const methodColor = {};
 D.methods.forEach((m, i) => methodColor[m.key] = COLORS[i % COLORS.length]);
+// WebGL draws 10k-point traces fast; without it (some VMs, remote desktops) fall back to SVG instead of a blank box
+const TRACE = (() => { try { return document.createElement("canvas").getContext("webgl") ? "scattergl" : "scatter"; } catch { return "scatter"; } })();
 const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
 const fmt = (v, d = 3) => v == null || !isFinite(v) ? "–" : (Math.abs(v) >= 100 ? v.toFixed(1) : Number(v.toPrecision(d)).toString());
 const store = { get(k, d) { try { const v = localStorage.getItem("hrvdash:" + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
                 set(k, v) { try { localStorage.setItem("hrvdash:" + k, JSON.stringify(v)); } catch {} } };
 
+const SHORT = { variance_reduction: "Variance ↓ %", roughness_reduction: "Roughness ↓ %", mean_error_pct: "Mean err %",
+                peak_preservation: "Peak score", correlation: "Corr", residual_std: "Residual std" };
+const mlabel = m => SHORT[m.name] || m.label;
+
 // ---------- tabs ----------
+let TAB = "patient";
 document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
+  TAB = b.dataset.tab;
   document.querySelectorAll("nav button").forEach(x => x.classList.toggle("on", x === b));
-  document.querySelectorAll("section").forEach(s => s.classList.toggle("on", s.id === "tab-" + b.dataset.tab));
-  if (b.dataset.tab === "cohort") renderCohort();
-  if (b.dataset.tab === "data") renderData();
+  document.querySelectorAll("section").forEach(s => s.classList.toggle("on", s.id === "tab-" + TAB));
+  document.getElementById("pmwrap").style.display = TAB === "patient" ? "" : "none";
+  if (TAB === "cohort") renderCohort();
+  if (TAB === "data") renderData();
+  if (TAB === "metrics") renderMetrics();
+  redraw();
   window.dispatchEvent(new Event("resize"));
 });
+// the left panel only drives the Patient tab
+function redraw() { if (TAB === "patient") drawPatient(); }
 
 // ---------- controls ----------
 const mBox = document.getElementById("methods");
@@ -168,7 +218,7 @@ D.methods.forEach(m => {
   l.title = m.label;
   mBox.appendChild(l);
 });
-mBox.onchange = () => { selMethods.clear(); mBox.querySelectorAll("input:checked").forEach(i => selMethods.add(i.value)); store.set("methods", [...selMethods]); drawPatient(); };
+mBox.onchange = () => { selMethods.clear(); mBox.querySelectorAll("input:checked").forEach(i => selMethods.add(i.value)); store.set("methods", [...selMethods]); redraw(); };
 document.querySelectorAll("[data-m]").forEach(b => b.onclick = () => {
   mBox.querySelectorAll("input").forEach(i => i.checked = b.dataset.m === "all" ||
     (b.dataset.m === "exact" && D.methods.find(m => m.key === i.value).trunc === 0));
@@ -185,9 +235,9 @@ function settingBoxes(el, key, def, cb) {
   el.onchange = () => { sel.clear(); el.querySelectorAll("input:checked").forEach(i => sel.add(i.value)); store.set(key, [...sel]); cb(); };
   return sel;
 }
-const selSettings = settingBoxes(document.getElementById("settings"), "settings", ["own", "default"], () => drawPatient());
+const selSettings = settingBoxes(document.getElementById("settings"), "settings", ["own", "default"], () => redraw());
 const cSettings = settingBoxes(document.getElementById("csettings"), "csettings", ["own", "default"], () => renderCohort());
-["showraw", "showres", "showexac"].forEach(id => document.getElementById(id).onchange = drawPatient);
+["showraw", "showres", "showexac"].forEach(id => document.getElementById(id).onchange = redraw);
 
 // ---------- patient list ----------
 const pSel = document.getElementById("patient");
@@ -218,7 +268,7 @@ document.getElementById("next").onclick = () => { if (pSel.selectedIndex < pSel.
 // ---------- patient data (one script per patient: works from file://) ----------
 const cache = {};
 let current = null;
-window.__patient = d => { cache[d.id] = d; if (d.id === pending) { current = d; drawPatient(); } };
+window.__patient = d => { cache[d.id] = d; if (d.id === pending) { current = d; redraw(); } };
 let pending = null;
 function plotMessage(text) {
   const el = document.getElementById("pplot");
@@ -229,7 +279,7 @@ function loadPatient(id) {
   if (!id) return;
   store.set("patient", id);
   pending = id;
-  if (cache[id]) { current = cache[id]; drawPatient(); return; }
+  if (cache[id]) { current = cache[id]; redraw(); return; }
   plotMessage("Loading " + id + "…");
   const s = document.createElement("script");
   s.src = "patients/" + encodeURIComponent(id) + ".js";
@@ -244,18 +294,11 @@ function drawPatient() {
   document.getElementById("pmeta").innerHTML =
     `<b>${d.id}</b> · ${p.group.replace("_", " ")} · ${d.raw.length} readings · ${new Set(d.chunk).size} segments` +
     (d.exac.length ? ` · <span class="flag">⚑ exacerbation: ${d.exac.join(", ")}</span>` : " · no exacerbation recorded");
-  const t0 = Date.parse(d.t0 + "Z");   // wall-clock time as recorded; Plotly shows ms as UTC
-  // insert a null after each segment so lines break at gaps
-  const xs = [], idx = [];
-  for (let i = 0; i < d.t.length; i++) {
-    if (i > 0 && d.chunk[i] !== d.chunk[i - 1]) { xs.push(t0 + d.t[i] * 60000 - 1); idx.push(-1); }
-    xs.push(t0 + d.t[i] * 60000); idx.push(i);
-  }
-  const pick = arr => idx.map(i => i < 0 ? null : arr[i]);
+  const { xs, idx, pick } = timeAxis(d);
   const showRes = document.getElementById("showres").checked;
   const traces = [];
   if (document.getElementById("showraw").checked)
-    traces.push({ x: xs, y: pick(d.raw), type: "scattergl", mode: "markers", name: "raw HRV",
+    traces.push({ x: xs, y: pick(d.raw), type: TRACE, mode: "markers", name: "raw HRV",
                   marker: { size: 3, color: css("--raw") }, hovertemplate: "raw %{y}<extra></extra>" });
   for (const m of D.methods) {
     if (!selMethods.has(m.key) || !d.s[m.key]) continue;
@@ -263,12 +306,12 @@ function drawPatient() {
       if (!selSettings.has(s) || !d.s[m.key][s]) continue;
       const y = pick(d.s[m.key][s]);
       const name = `${m.key} · ${s}`;
-      traces.push({ x: xs, y, type: "scattergl", mode: "lines", name, connectgaps: false,
+      traces.push({ x: xs, y, type: TRACE, mode: "lines", name, connectgaps: false,
                     line: { color: methodColor[m.key], width: 1.6, dash: DASHES[s] },
                     hovertemplate: name + " %{y}<extra></extra>" });
       if (showRes) {
         const r = idx.map(i => i < 0 || d.s[m.key][s][i] == null ? null : +(d.raw[i] - d.s[m.key][s][i]).toFixed(1));
-        traces.push({ x: xs, y: r, type: "scattergl", mode: "lines", name: name + " residual", yaxis: "y2",
+        traces.push({ x: xs, y: r, type: TRACE, mode: "lines", name: name + " residual", yaxis: "y2",
                       showlegend: false, connectgaps: false, line: { color: methodColor[m.key], width: 1, dash: DASHES[s] } });
       }
     }
@@ -276,26 +319,45 @@ function drawPatient() {
   const shapes = document.getElementById("showexac").checked ? d.exac.map(day => ({
     type: "rect", xref: "x", yref: "paper", x0: day, x1: new Date(Date.parse(day) + 86400000).toISOString().slice(0, 10),
     y0: 0, y1: 1, fillcolor: css("--exac"), line: { width: 0 }, layer: "below" })) : [];
-  const ink = css("--ink"), grid = css("--line");
+  const ink = css("--ink"), grid = css("--line"), yr = yRanges(d);
+  const day = (n, label) => ({ count: n, label, step: "day", stepmode: "backward" });
   const layout = {
     paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "rgba(0,0,0,0)", font: { color: ink, size: 12 },
-    margin: { l: 50, r: 10, t: 10, b: 40 }, hovermode: "x unified", shapes, dragmode: "zoom",
+    margin: { l: 55, r: 10, t: 36, b: 40 }, hovermode: "x unified", shapes, dragmode: "pan",
     legend: { orientation: "h", y: -0.12 },
-    // open on the first 3 days; double-click shows the whole recording
-    xaxis: { type: "date", gridcolor: grid, range: [xs[0], Math.min(xs[xs.length - 1], xs[0] + 3 * 86400000)] },
-    yaxis: { title: "HRV (SDNN)", gridcolor: grid, domain: showRes ? [0.38, 1] : [0, 1] },
-    yaxis2: { title: "residual", gridcolor: grid, domain: [0, 0.3], visible: showRes, zeroline: true, zerolinecolor: ink },
+    uirevision: d.id,   // keep the user's pan/zoom across redraws until the patient changes
+    // open on the first 3 days; drag pans, scroll zooms time, double-click shows the whole recording
+    xaxis: { type: "date", gridcolor: grid, range: [xs[0], Math.min(xs[xs.length - 1], xs[0] + 3 * 86400000)],
+             rangeselector: { x: 0, y: 1.02, bgcolor: css("--chip"), activecolor: css("--line"), font: { color: ink },
+                              buttons: [day(1, "1 day"), day(3, "3 days"), day(7, "1 week"), { step: "all", label: "all" }] } },
+    yaxis: { title: { text: "HRV (SDNN, ms)" }, gridcolor: grid, domain: showRes ? [0.38, 1] : [0, 1], range: yr.y, fixedrange: true },
+    yaxis2: { title: { text: "raw − smoothed" }, gridcolor: grid, domain: [0, 0.3], visible: showRes, range: yr.r, fixedrange: true,
+              zeroline: true, zerolinecolor: ink },
   };
   const el = document.getElementById("pplot");
-  Plotly.purge(el);   // wiping innerHTML alone leaves Plotly's state behind and the next draw renders blank
-  el.innerHTML = "";
-  Plotly.newPlot(el, traces, layout, { responsive: true, displaylogo: false });
+  if (!el.data) el.innerHTML = "";   // first draw, or replacing a "Loading…" message (plotMessage purged the old plot)
+  Plotly.react(el, traces, layout, { responsive: true, displaylogo: false, scrollZoom: true });
   patientTable(d.id);
+}
+
+// Y ranges fixed per patient (over raw + every smoothed series), so the scale never jumps
+// when traces are toggled or the time window moves. Residual: 99.5th percentile, symmetric.
+function yRanges(d) {
+  if (d._yr) return d._yr;
+  const series = [d.raw];
+  for (const m in d.s) for (const s in d.s[m]) series.push(d.s[m][s]);
+  let lo = Infinity, hi = -Infinity;
+  for (const a of series) for (const v of a) if (v != null) { lo = Math.min(lo, v); hi = Math.max(hi, v); }
+  const res = [];
+  for (const a of series.slice(1)) a.forEach((v, i) => { if (v != null && d.raw[i] != null) res.push(Math.abs(d.raw[i] - v)); });
+  res.sort((a, b) => a - b);
+  const r = res.length ? 1.1 * res[Math.floor(0.995 * (res.length - 1))] : 1, pad = 0.04 * (hi - lo || 1);
+  return d._yr = { y: [lo - pad, hi + pad], r: [-r, r] };
 }
 
 function patientTable(id) {
   const pm = D.perPatient[id] || {};
-  let h = "<tr><th>Method</th><th class='l'>Settings</th>" + D.metrics.map(m => `<th title="${m.label}">${m.name}${m.hib ? " ↑" : " ↓"}</th>`).join("") + "</tr>";
+  let h = "<tr><th>Method</th><th class='l'>Settings</th>" + D.metrics.map(m => `<th>${mlabel(m)}</th>`).join("") + "</tr>";
   for (const m of D.methods) {
     if (!selMethods.has(m.key) || !pm[m.key]) continue;
     for (const s of ["own", "combined", "default"]) {
@@ -306,6 +368,35 @@ function patientTable(id) {
   }
   document.getElementById("ptable").innerHTML = h;
 }
+
+function timeAxis(d) {
+  const t0 = Date.parse(d.t0 + "Z");   // wall-clock time as recorded; Plotly shows ms as UTC
+  // insert a null after each segment so lines break at gaps
+  const xs = [], idx = [];
+  for (let i = 0; i < d.t.length; i++) {
+    if (i > 0 && d.chunk[i] !== d.chunk[i - 1]) { xs.push(t0 + d.t[i] * 60000 - 1); idx.push(-1); }
+    xs.push(t0 + d.t[i] * 60000); idx.push(i);
+  }
+  return { t0, xs, idx, pick: arr => idx.map(i => i < 0 ? null : arr[i]) };
+}
+
+// ---------- metrics tab ----------
+const DEFS = [
+  ["variance_reduction", "100 × (1 − var(smoothed) / var(raw))",
+   "Share of the raw signal's variance removed. 100% = perfectly flat output; 0% = output as jumpy as raw.", "higher = smoother"],
+  ["roughness_reduction", "100 × (1 − mean|Δsmoothed| / mean|Δraw|)<br>Δ = change from one reading to the next",
+   "Reduction in point-to-point jitter. Variance ↓ is about overall spread; roughness ↓ is about local wiggle.", "higher = smoother"],
+  ["mean_error_pct", "100 × |mean(smoothed) − mean(raw)| / |mean(raw)|",
+   "Level bias — does the baseline sit at the right average height?", "lower = unbiased"],
+  ["peak_preservation", "Raw peaks with prominence ≥ 0.5 × std(raw). For each: height above the local minimum within ±6 readings (±1 h), in raw and in smoothed. Score = median of clip(smoothed height / raw height, 0, 1).",
+   "Fraction of each real spike's height that survives smoothing: are true excursions flattened or kept? (Prominence as in SciPy's find_peaks.)", "higher = more faithful"],
+  ["correlation", "Pearson correlation(raw, smoothed)",
+   "Linear agreement: does the smoothed series still move with the raw series over time?", "higher = more faithful"],
+  ["residual_std", "std(raw − smoothed), in ms",
+   "Spread of the residual — the signal the change-point (CPD) stage consumes.", "lower spread, but enough structure kept (0 = nothing smoothed)"],
+];
+document.getElementById("mdefs").innerHTML = "<tr><th>Metric</th><th class='l'>Formula</th><th class='l'>What it means</th><th class='l'>Better</th></tr>" +
+  DEFS.map(([k, f, w, b]) => `<tr><td>${SHORT[k]}</td><td class="f">${f}</td><td>${w}</td><td>${b}</td></tr>`).join("");
 
 // ---------- cohort comparison ----------
 const GROUPS = { combined: "AIIMS + COPD", aiims: "AIIMS", aiims_adult: "AIIMS adults", aiims_paed: "AIIMS children",
@@ -344,7 +435,7 @@ function renderCohort() {
   rows.sort((a, b) => a.dist - b.dist);
   const bestDist = Math.min(...rows.map(o => o.dist));
   let h = "<tr><th>Method</th><th class='l'>Settings</th><th>n</th><th title='mean |gap| to the ideal causal filter'>distance ↓</th>" +
-          D.metrics.map(m => `<th title="${m.label}">${m.name}</th>`).join("") + "</tr>";
+          D.metrics.map(m => `<th>${mlabel(m)}</th>`).join("") + "</tr>";
   h += `<tr class="ref"><td>ideal causal filter</td><td class="l">simulated, this cohort's model</td><td></td><td>0</td>` +
        D.metrics.map(x => `<td>${fmt(ideal[x.name])}</td>`).join("") + "</tr>";
   for (const o of rows) {
@@ -366,54 +457,78 @@ function renderCohort() {
                           arrayminus: rs.map(r => r[x.name] - r[x.name + "_q25"]), thickness: 1, width: 0 } };
     });
     const shapes = [{ type: "line", xref: "x", yref: "paper", x0: ideal[x.name], x1: ideal[x.name], y0: 0, y1: 1, line: { dash: "dot", color: ink } }];
-    Plotly.newPlot(div, traces, { title: { text: `${x.label} · dotted = ideal causal filter`, font: { size: 13 } }, shapes,
+    Plotly.newPlot(div, traces, { title: { text: `${mlabel(x)} · dotted = ideal causal filter`, font: { size: 13 } }, shapes,
       paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "rgba(0,0,0,0)", font: { color: ink, size: 11 },
       margin: { l: 80, r: 10, t: 34, b: 30 }, showlegend: x === D.metrics[0], legend: { orientation: "h", y: -0.15 },
       xaxis: { gridcolor: grid }, yaxis: { gridcolor: grid, autorange: "reversed" } }, { displayModeBar: false, responsive: true });
   }
 }
 
+// ---------- metrics: cohort-wide numbers ----------
+const mg = document.getElementById("mgroup");
+for (const [k, v] of Object.entries(GROUPS)) mg.add(new Option(v, k));
+mg.value = store.get("mgroup", "combined");
+mg.onchange = () => { store.set("mgroup", mg.value); renderMetrics(); };
+const DECIMALS = { variance_reduction: 1, roughness_reduction: 1, mean_error_pct: 2, peak_preservation: 2, correlation: 2, residual_std: 1 };
+const fx = (m, v) => v == null || !isFinite(v) ? "–" : v.toFixed(DECIMALS[m.name] ?? 2);
+function renderMetrics() {
+  const g = mg.value, ideal = D.reference[refCohort(g)].ideal;
+  const ms = DEFS.map(([k]) => D.metrics.find(m => m.name === k)).filter(Boolean);
+  const n = (rowsFor(g, "default")[0] || {}).n;
+  document.getElementById("mnote").innerHTML = `Median across ${n} patients. <b>Derived</b> = settings derived from the
+    patients' own cohort. <b>Ideal filter</b> = the best possible live filter for this cohort's measured noise and memory
+    (simulated) — a yardstick, not a target.`;
+  let h = "<tr><th>Method</th><th class='l'>Settings</th>" + ms.map(m => `<th>${mlabel(m)}</th>`).join("") + "</tr>";
+  h += `<tr class="ref"><td>ideal filter</td><td class="l">simulated</td>` + ms.map(m => `<td>${fx(m, ideal[m.name])}</td>`).join("") + "</tr>";
+  for (const m of D.methods) ["default", "own"].forEach((s, i) => {
+    const r = rowsFor(g, s).find(x => x.method === m.key);
+    if (!r) return;
+    h += `<tr>${i ? "<td></td>" : `<td><span class="sw" style="background:${methodColor[m.key]}"></span> ${m.key}</td>`}` +
+         `<td class="l">${s === "own" ? "derived" : "default"}</td>` + ms.map(x => `<td>${fx(x, r[x.name])}</td>`).join("") + "</tr>";
+  });
+  document.getElementById("mtable").innerHTML = h;
+}
+
 // ---------- data characteristics ----------
 function renderData() {
-  const S = D.cohortStats, cs = ["aiims", "copd", "combined"];
-  const lab = { aiims: "AIIMS", copd: "COPD", combined: "AIIMS + COPD" };
+  const O = D.overview, A = O.all, S = D.cohortStats.combined;
+  const n = v => Number(v).toLocaleString("en");
+  const cols = [["aiims_adult", "AIIMS adults"], ["aiims_paed", "AIIMS children"], ["copd", "COPD"], ["all", "Total"]];
   const rows = [
-    ["Patients with HRV (stats)", c => S[c].n_patients, ""],
-    ["Readings per patient", c => S[c].n_obs, "median"],
-    ["Reading interval inside a segment", c => S[c].dt_min + " min", "median"],
-    ["Median HRV", c => fmt(S[c].median_hrv), "SDNN"],
-    ["Readings at the device cap (129)", c => (100 * S[c].frac_at_cap).toFixed(1) + "%", ""],
-    ["White noise R (log)", c => fmt(S[c].R_log), "variogram"],
-    ["Level variance S (log)", c => fmt(S[c].S_log), "variogram"],
-    ["Noise share R/(R+S) (raw)", c => (100 * S[c].R_raw / (S[c].R_raw + S[c].S_raw)).toFixed(0) + "%", "of variance"],
-    ["Level correlation time τ", c => fmt(S[c].tau_log, 3) + " min", "how long the level persists"],
-    ["Day-to-day memory τ_day", c => fmt(S[c].tau_day_min, 3) + " min", "from daily medians"],
-    ["Circadian amplitude, 1st / 2nd / 3rd harmonic (log)", c => [1, 2, 3].map(h => fmt(S[c]["amp" + h + "_log"], 2)).join(" / "), ""],
-    ["Patients with significant harmonic 1 / 2 / 3", c => [1, 2, 3].map(h => Math.round(100 * S[c].frac_harm_sig[h]) + "%").join(" / "), "autocorr.-corrected"],
-    ["Day-to-day change of circadian shape", c => fmt(S[c].dcoef_var_log), "beyond estimation noise"],
-    ["Hourly noise level p10 / p50 / p90", c => S[c].hour_vol_p10_p50_p90.map(v => fmt(v, 2)).join(" / "), "log units"],
-    ["Volatility spell length τ_vol", c => fmt(S[c].tau_vol, 3) + " min", ""],
-    ["Distinct activity states (sleep/rest/active)", c => S[c].n_distinct_states, "paired Wilcoxon"],
-    ["Segment length p25 / p50 / p75 / p90", c => ["0.25", "0.5", "0.75", "0.9"].map(q => S[c].chunk_len_quantiles[q]).join(" / ") + " readings", "split at ≥180 min"],
-    ["Readings in segments ≥ 10", c => (100 * S[c].frac_readings_in_chunks_ge_10).toFixed(1) + "%", "smoothable"],
+    ["Participants (AIIMS + COPD)", g => n(O[g].participants)],
+    ["… with HRV readings", g => n(O[g].with_hrv)],
+    ["… smoothed (at least one segment of ≥ 10 readings)", g => n(O[g].smoothed)],
+    ["… with exacerbation days", g => `${n(O[g].with_exac)} <span class="iqr">(${n(O[g].exac_days)} days)</span>`],
+    ["HRV readings", g => n(O[g].readings)],
+    ["Days with HRV per participant (median)", g => fmt(O[g].days_median)],
   ];
-  let h = "<tr><th class='l'>Characteristic</th>" + cs.map(c => `<th>${lab[c]}</th>`).join("") + "<th class='l'>note</th></tr>";
-  for (const [name, f, note] of rows) h += `<tr><td class="l">${name}</td>` + cs.map(c => `<td>${f(c)}</td>`).join("") + `<td class="l iqr">${note}</td></tr>`;
-  document.getElementById("dtable").innerHTML = h;
-  const ink = css("--ink"), grid = css("--line");
-  const base = { paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "rgba(0,0,0,0)", font: { color: ink, size: 11 },
-                 margin: { l: 50, r: 10, t: 34, b: 60 }, legend: { orientation: "h", y: -0.3 }, xaxis: { gridcolor: grid }, yaxis: { gridcolor: grid } };
-  const bins = Object.keys(S.combined.gap_hist_min);
-  Plotly.newPlot("gapplot", cs.slice(0, 2).map(c => { const v = bins.map(b => S[c].gap_hist_min[b]); const tot = v.reduce((a, b) => a + b, 0);
-    return { type: "bar", name: lab[c], x: bins, y: v.map(x => 100 * x / tot) }; }),
-    { ...base, title: { text: "Time between readings (min), % of gaps", font: { size: 13 } }, yaxis: { type: "log", gridcolor: grid },
-      shapes: [{ type: "line", x0: 5.5, x1: 5.5, yref: "paper", y0: 0, y1: 1, line: { dash: "dot", color: ink } }] }, { displayModeBar: false, responsive: true });
-  const qs = ["0.1", "0.25", "0.5", "0.75", "0.9"];
-  Plotly.newPlot("chunkplot", cs.slice(0, 2).map(c => ({ type: "bar", name: lab[c], x: qs.map(q => "p" + Math.round(100 * q)), y: qs.map(q => S[c].chunk_len_quantiles[q]) })),
-    { ...base, title: { text: "Segment length (readings) by percentile", font: { size: 13 } } }, { displayModeBar: false, responsive: true });
+  document.getElementById("dtable").innerHTML = "<tr><th></th>" + cols.map(([, l]) => `<th>${l}</th>`).join("") + "</tr>" +
+    rows.map(([name, f]) => `<tr><td class="l">${name}</td>` + cols.map(([g]) => `<td>${f(g)}</td>`).join("") + "</tr>").join("");
+  const segMed = S.chunk_len_quantiles["0.5"];
+  const steps = [
+    ["Smartwatch export", "Minute-by-minute records. HRV (SDNN, ms) is reported about once every 10 minutes; the device caps it at 129.",
+     `${A.participants} participants`, "AIIMS adults + children, COPD"],
+    ["Keep the HRV readings", `Drop minutes without an HRV value and sort by time. No resampling or interpolation: each reading keeps its own ` +
+     `timestamp, and the methods use the real time between readings (median ${S.dt_min} min).`,
+     `${n(A.readings)} readings`, `${A.with_hrv} participants · ${A.participants - A.with_hrv} had no HRV`],
+    ["Split at gaps of 3 h or more (180-min rule)", `A gap of ≥ 180 min (watch off, charging, not worn) starts a new segment, and every ` +
+     `smoother restarts there — nothing is carried across the gap. Shorter gaps stay inside the segment as uneven spacing ` +
+     `(99% of them are ≤ ${S.inside_dt_quantiles["0.99"]} min).`,
+     `${n(A.segments)} segments`, `median ${segMed} readings (≈ ${(segMed * S.dt_min / 60).toFixed(1)} h)`],
+    ["Skip very short segments", "Segments with fewer than 10 readings (about 1.5 h) are too short to estimate a level and stay unsmoothed.",
+     `${(100 * A.kept / A.readings).toFixed(0)}% of readings kept`, `${A.smoothed} participants`],
+    ["Smooth each segment", "10 methods, each run with its default settings and with settings derived from the cohort's own data. " +
+     "Forward-only: each smoothed value uses past and current readings only.", `${D.methods.length} methods`, "default + derived settings"],
+    ["Smoothed level and residual", "Residual = raw − smoothed. Both are scored with the six metrics (Metrics tab) and passed on to the change-point stage.",
+     `${A.with_exac} participants`, `with exacerbation days (${A.exac_days} days)`],
+  ];
+  document.getElementById("flow").innerHTML = steps.map(([t, p, c, sub], i) =>
+    `<div class="step"><span class="n">${i + 1}</span><div><h4>${t}</h4><p>${p}</p></div>` +
+    `<div class="count">${c}<small>${sub}</small></div></div>`).join('<div class="arrow">↓</div>');
 }
 
 fillPatients();
+// #metrics, #cohort, #data open that tab
 const tabBtn = document.querySelector(`nav button[data-tab="${location.hash.slice(1)}"]`);
 if (tabBtn) tabBtn.click();
 </script>

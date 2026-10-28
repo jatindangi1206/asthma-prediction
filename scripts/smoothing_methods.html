@@ -6,54 +6,76 @@
 <title>HRV Smoothing Methods</title>
 <style>
 :root { --bg: #f7f7f5; --panel: #fff; --ink: #1d232a; --muted: #5d6670; --line: #dde1e5; --accent: #0f766e;
-        --derived: #0f766e; --physiology: #7c3aed; --convention: #b45309; --numerical: #64748b; --structural: #be185d; --pipeline: #1d4ed8; }
+        --chip: #eef1f3; --good: #15803d; --bad: #b91c1c; --hl: #fef9c3; }
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
   --bg: #12161a; --panel: #1a2026; --ink: #e6e9ec; --muted: #9aa4ae; --line: #2c343c; --accent: #2dd4bf;
-  --derived: #2dd4bf; --physiology: #c4b5fd; --convention: #fbbf24; --numerical: #94a3b8; --structural: #f9a8d4; --pipeline: #93c5fd; } }
+  --chip: #232b33; --good: #4ade80; --bad: #f87171; --hl: #3a3410; } }
 :root[data-theme="dark"] { --bg: #12161a; --panel: #1a2026; --ink: #e6e9ec; --muted: #9aa4ae; --line: #2c343c; --accent: #2dd4bf;
-  --derived: #2dd4bf; --physiology: #c4b5fd; --convention: #fbbf24; --numerical: #94a3b8; --structural: #f9a8d4; --pipeline: #93c5fd; }
+  --chip: #232b33; --good: #4ade80; --bad: #f87171; --hl: #3a3410; }
 * { box-sizing: border-box; }
-body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
-main { max-width: 1180px; margin: 0 auto; padding: 20px 16px 48px; }
-h1 { font-size: 24px; margin: 0 0 4px; } h2 { font-size: 19px; margin: 0 0 2px; }
-.sub { color: var(--muted); margin: 0 0 16px; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+main { max-width: 1080px; margin: 0 auto; padding: 20px 16px 48px; }
+h1 { font-size: 24px; margin: 0 0 4px; } h2 { font-size: 19px; margin: 0 0 6px; } h3 { font-size: 15px; margin: 14px 0 6px; }
+a { color: var(--accent); }
+.sub { color: var(--muted); margin: 0 0 8px; }
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 16px; margin: 14px 0; }
-.toc { display: flex; flex-wrap: wrap; gap: 6px; }
+.card p, .card ul, .card ol { margin: 6px 0; max-width: 860px; }
+.card li { margin: 3px 0; }
+.plain { font-size: 16px; }
+.muted { color: var(--muted); font-size: 13px; }
+.toc { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .toc a { border: 1px solid var(--line); border-radius: 999px; padding: 2px 10px; color: var(--ink); text-decoration: none; font-size: 13px; }
-.tag { display: inline-block; font-size: 11px; font-weight: 600; padding: 1px 7px; border-radius: 999px; border: 1px solid currentColor; white-space: nowrap; }
-.how-it-works { margin: 8px 0 10px; max-width: 900px; }
-.causal { font-size: 13px; color: var(--muted); }
+.badge { display: inline-block; font-size: 12px; padding: 1px 8px; border-radius: 999px; background: var(--chip); white-space: nowrap; }
 .tablewrap { overflow-x: auto; }
-table { border-collapse: collapse; width: 100%; font-size: 13px; }
+table { border-collapse: collapse; width: 100%; font-size: 14px; }
 th, td { text-align: left; vertical-align: top; padding: 6px 8px; border-bottom: 1px solid var(--line); }
-th { color: var(--muted); font-weight: 600; }
+th { color: var(--muted); font-weight: 600; font-size: 13px; }
 td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
-td.knob { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; white-space: nowrap; }
-td.why { color: var(--muted); min-width: 260px; }
-.legend { display: flex; flex-wrap: wrap; gap: 8px 18px; font-size: 13px; }
-select { padding: 4px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--ink); font: inherit; }
+td.knob { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; white-space: nowrap; }
+td.changed { background: var(--hl); font-weight: 600; }
+.good { color: var(--good); font-weight: 600; } .bad { color: var(--bad); font-weight: 600; }
+details { margin-top: 10px; } summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+details li { font-size: 13px; color: var(--muted); }
 code { font-size: 13px; }
 </style>
 </head>
 <body>
 <main>
-<h1>HRV Smoothing Methods</h1>
-<p class="sub">What each of the 10 smoothers does, which settings it has, what each setting changes, and the value
-  derived from each cohort (AIIMS, COPD, AIIMS + COPD). <a href="dashboard/index.html" id="dashlink">Open the dashboard</a>.</p>
+<h1>How the 10 smoothing methods work</h1>
+<p class="sub">Plain-language guide: what each method does, which settings it has, and which values we derived from
+  the data. <a href="dashboard/index.html">Open the dashboard</a> to see them on real patients.</p>
+
+<div class="card">
+  <h2>The idea</h2>
+  <ul>
+    <li>The watch gives one HRV value about every 10 minutes. Each value = the patient's <b>true current HRV level</b>
+      + <b>random noise</b> (movement, a bad measurement window). A smoother tries to recover the true level.</li>
+    <li>Too little smoothing leaves the noise in. Too much erases real changes — including the ones that may signal
+      an attack. The goal is the balance that fits <i>this</i> data.</li>
+    <li>Every method only looks at past and current readings, so it could run live on the watch. A gap of 3 h or
+      more splits the recording into <b>segments</b>; each method starts fresh in each segment. Segments with fewer
+      than 10 readings are left unsmoothed.</li>
+  </ul>
+</div>
 
 <div class="card">
   <h2>How the settings were chosen</h2>
-  <p class="how-it-works">Every method assumes the same thing: an HRV reading is a <b>slowly wandering level plus white
-    noise</b>. The level is what we want; the noise is what a smoother removes. Three numbers describe that, measured per
-    patient from a robust variogram (how different two readings are as a function of the time between them) and then
-    taken as the median across the cohort's patients:</p>
+  <p>Nothing was tuned or searched. We measured a few properties of each patient's HRV, took the median across the
+    patients of a cohort, and converted them into each method's own settings. This was done separately for AIIMS,
+    COPD and both together.</p>
   <div class="tablewrap"><table id="core"></table></div>
-  <p class="how-it-works">Every derived setting is a translation of these numbers (plus cadence, circadian shape and
-    volatility) into that method's own parameterisation. Nothing was searched or tuned. A setting that cannot be measured
-    from the data says so and states why it keeps its value.</p>
-  <div class="legend" id="legend"></div>
-  <p class="how-it-works" style="margin-top:10px">Show derivation details for
-    <select id="cohort"><option value="combined">AIIMS + COPD</option><option value="aiims">AIIMS</option><option value="copd">COPD</option></select></p>
+  <p class="muted">Settings that cannot be measured from the data keep their standard values; each card lists them.
+    <b>Default</b> = the value the code shipped with. Highlighted values differ from the default.</p>
+</div>
+
+<div class="card">
+  <h2>At a glance</h2>
+  <div class="tablewrap"><table id="overview"></table></div>
+  <p class="muted"><b>Closeness to ideal</b>: how far the method's behaviour (noise removed, peaks kept, similarity to
+    the raw signal) is from the best possible live filter for data like ours, simulated with the measured noise and
+    memory. 0 = identical; lower is better. AIIMS + COPD patients.<br>
+    <b>Live-safe</b>: "yes" = a value never changes when later readings arrive. "almost" = filters forward, but
+    scales a few numbers (e.g. the patient's noise level) using the whole recording, so it peeks slightly ahead.</p>
   <div class="toc" id="toc"></div>
 </div>
 
@@ -61,103 +83,167 @@ code { font-size: 13px; }
 </main>
 <script>
 const DATA = /*__DATA__*/null;
-const KIND_TEXT = {
-  derived: "derived — computed from this cohort's data",
-  physiology: "physiology — fixed by biology or the device",
-  convention: "convention — standard statistical default",
-  numerical: "numerical — stability / speed only; does not change what is estimated",
-  structural: "structural — a modelling choice",
-  pipeline: "pipeline — shared by every method",
-};
-const ABOUT = {
-  anrewma: ["Adaptive-normalisation robust EWMA",
-    "Two stages, both forward-only. A slow running mean and standard deviation turn each reading into a z-score " +
-    "relative to the recent baseline. A robust exponentially weighted average (a one-state Kalman filter with an " +
-    "inverse-multiquadric weight) then smooths those z-scores, nearly ignoring readings far from the current estimate. " +
-    "The result is mapped back with the same mean and standard deviation. Works on raw HRV."],
-  ctimm: ["Continuous-time interacting multiple model",
-    "A bank of three Kalman filters on log HRV that differ only in how fast they let the level move (calm, normal, " +
-    "volatile). At each reading the filters are mixed according to Markov mode probabilities, each is updated, and the " +
-    "modes are re-weighted by how well they predicted the reading. The output blends them, so stiffness adapts by itself."],
-  gammadglm: ["Gamma conjugate-discount dynamic GLM",
-    "A Bayesian time-series model whose readings are Gamma distributed (always positive, noise proportional to the " +
-    "level). The log of the expected HRV is a level plus circadian harmonics. Between readings the state's information " +
-    "is discounted (kept at rate delta per step), and each reading updates it in closed form."],
-  gpssm: ["Gaussian-process state-space model",
-    "A Kalman filter on log HRV with a mean-reverting level. How strongly the level carries over from one reading to " +
-    "the next is learned per patient by a Gaussian-process regression of each reading on the previous one. Process and " +
-    "measurement noise come from the patient's data, times q_scale and r_scale."],
-  hrkf: ["Huber robust Kalman filter",
-    "The same level + circadian-harmonics model as gammadglm, in log HRV, but the update uses a Huber loss: residuals " +
-    "beyond huber_delta standard deviations count linearly, not quadratically, so motion artefacts move the estimate " +
-    "far less. Solved per reading by a few iteratively reweighted least-squares steps."],
-  kim: ["Kim Markov-switching state-space filter",
-    "Two HRV regimes (low and high, e.g. awake and asleep), each a level that reverts to its own mean. At every reading " +
-    "the Kim filter runs all four regime-to-regime Kalman branches, updates the regime probabilities (Hamilton filter), " +
-    "and collapses the branches back to two. The output is the probability-weighted level."],
-  krlst: ["Kernel recursive least-squares tracker",
-    "Online Gaussian-process regression of log HRV on time with an RBF kernel. It keeps a fixed-size dictionary of past " +
-    "readings, and a forgetting factor pulls old information back toward the prior so it can follow a drifting baseline."],
-  logmhw: ["Log multiplicative Holt-Winters",
-    "Exponential smoothing on log HRV: a level, a damped trend, and a time-of-day seasonal profile (one value per 10-min " +
-    "clock slot) seeded from the patient's own average day. Additive on the log scale means multiplicative on HRV."],
-  ossa: ["Online singular spectrum analysis",
-    "At each reading, the trailing window (up to one day) is turned into a lag matrix, its SVD keeps the leading " +
-    "components, and the newest point of that low-rank reconstruction is the estimate. Patterns that repeat in the " +
-    "window are kept; the rest is treated as noise."],
-  rspf: ["Regime-switching particle filter",
-    "500 particles track a regime (K HRV levels with sticky switching), a level that reverts to its regime mean, and a " +
-    "circadian harmonic, all in the logit of the patient's own [min, max] range, so the output stays inside it. The " +
-    "estimate is the weighted particle mean."],
-};
-const fmt = v => Array.isArray(v) ? v.map(fmt).join(" / ") : typeof v === "number" ? (Math.abs(v) >= 1000 || (v !== 0 && Math.abs(v) < 1e-3) ? v.toExponential(2) : String(+v.toPrecision(4))) : String(v);
-const esc = s => String(s).replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
-const tag = k => `<span class="tag" style="color:var(--${k})">${k}</span>`;
-
 const S = DATA.cohortStats;
-const core = [
-  ["R", "white noise variance (log HRV) — measurement noise plus physiology faster than 10 min", c => S[c].R_log],
-  ["S", "variance of the wandering level (log HRV)", c => S[c].S_log],
-  ["τ", "minutes the level stays correlated", c => S[c].tau_log],
-  ["noise share", "R / (R + S) on raw HRV: the variance removed by a smoother that output the true level exactly", c => (100 * S[c].R_raw / (S[c].R_raw + S[c].S_raw)).toFixed(0) + "%"],
-  ["cadence", "median minutes between readings inside a segment", c => S[c].dt_min],
-  ["segment", "median readings per segment (split at gaps ≥ 180 min)", c => S[c].chunk_len_quantiles["0.5"]],
-];
-document.getElementById("core").innerHTML = "<tr><th></th><th>meaning</th><th>AIIMS</th><th>COPD</th><th>AIIMS + COPD</th></tr>" +
-  core.map(([n, m, f]) => `<tr><td class="knob">${n}</td><td>${m}</td>` + ["aiims", "copd", "combined"].map(c => `<td class="num">${fmt(f(c))}</td>`).join("") + "</tr>").join("");
-document.getElementById("legend").innerHTML = Object.entries(KIND_TEXT).map(([k, t]) => `<span>${tag(k)} ${esc(t.split(" — ")[1])}</span>`).join("");
+const COHORTS = [["aiims", "AIIMS"], ["copd", "COPD"], ["combined", "AIIMS + COPD"]];
 
+// Per method: [full name, one sentence, how it works (steps), {knob: [what it controls, turning it up →, where our value comes from]}]
+const M = {
+  anrewma: ["Adaptive-normalised robust running average",
+    "A running average that ignores spikes, computed after putting each reading on the patient's recent scale.",
+    ["Track a slow running mean and spread of HRV, and express each reading as \"how unusual is this right now\".",
+     "Average those with a running average that gives almost no weight to readings far from the current estimate.",
+     "Convert the result back to HRV units."],
+    { norm_alpha: ["How fast the slow baseline follows drift", "baseline follows day-to-day changes faster", "how similar one day's median HRV is to the next day's"],
+      ewma_r: ["Assumed size of the noise", "smoother output", "the measured noise share of the variation"],
+      ewma_q: ["Assumed real change of the level per reading", "follows the readings more closely", "how much the true level moves in 10 min"] }],
+  ctimm: ["Three-speed Kalman filter (interacting multiple model)",
+    "Three trackers — calm, normal, volatile — blended by whichever is currently predicting best.",
+    ["Three Kalman filters run side by side on log HRV. (A Kalman filter updates its estimate by weighing the new reading against its prediction, using the assumed noise sizes.) They differ only in how fast the level may move.",
+     "After each reading, each tracker's weight goes up if it predicted that reading well.",
+     "The output is the weighted blend, so the method stiffens or loosens by itself."],
+    { r_scale: ["Assumed noise, × the method's own estimate", "smoother output", "set so the assumed noise equals the measured noise"],
+      q_scale: ["How fast the level may move", "follows the readings more closely", "how much the true level moves per minute, relative to the noise"],
+      mode_mults: ["Speed of the calm / normal / volatile trackers", "wider range of speeds", "the quietest 10%, median and noisiest 10% of hours"],
+      stickiness: ["Chance of staying in the same speed at the next reading", "speeds switch less often", "how long a calm or noisy spell lasts"] }],
+  gammadglm: ["Bayesian level + daily-rhythm model (Gamma dynamic GLM)",
+    "Models HRV as a level plus a 24-hour rhythm, with a memory of the past that fades at a set rate.",
+    ["Expected HRV (on a log scale) = a level + a daily rhythm made of up to three waves (24 h, 12 h, 8 h).",
+     "Before each reading, old information fades: by deltrend for the level, by delseas for the daily shape.",
+     "Each reading updates the level and the rhythm. Noise is assumed to grow with the HRV value."],
+    { n_harmonics: ["How detailed the daily rhythm is (1 = 24 h wave only, 3 = 24 h + 12 h + 8 h)", "sharper daily shape", "rhythms clearly present in at least half the patients"],
+      deltrend: ["Memory of the level (close to 1 = long memory)", "smoother, slower level", "the measured noise vs how much the level moves → the best balance for that ratio"],
+      delseas: ["Memory of the daily shape (1 = shape never changes)", "daily shape changes less", "how much a patient's daily shape changes from day to day"],
+      shape_scale: ["How much each reading is trusted", "follows the readings more closely", "set so the assumed noise equals the measured noise"],
+      C0_var: ["How unsure the level is at the start of a segment", "first readings of a segment move the level more", "how far the level typically is from the patient's median"],
+      C0_seas_var: ["How large a daily rhythm is plausible at the start of a segment (per wave)", "short segments can show bigger rhythms", "typical size of each daily wave"] }],
+  gpssm: ["Kalman filter with learned carry-over (GP state-space model)",
+    "A Kalman filter whose \"how much of this reading carries into the next\" is learned per patient.",
+    ["Learn for each patient how strongly one reading predicts the next (a Gaussian-process regression).",
+     "Run a Kalman filter on log HRV with that carry-over and a pull back toward the patient's average.",
+     "Noise sizes are estimated from the patient, then multiplied by the two settings below."],
+    { r_scale: ["Assumed noise, × the method's own estimate", "smoother output", "set so the assumed noise equals the measured noise"],
+      q_scale: ["How fast the level may move, × the method's own estimate", "follows the readings more closely", "how far the level wanders, given the learned carry-over"] }],
+  hrkf: ["Spike-resistant level + daily-rhythm filter (Huber Kalman filter)",
+    "The same level + daily-rhythm model as gammadglm, but surprising readings count less instead of fully.",
+    ["Log HRV = a level + a daily rhythm (up to three waves).",
+     "Update with each reading, but readings far from the prediction get reduced weight (Huber rule).",
+     "Old information fades at rates deltrend and delseas, as in gammadglm."],
+    { n_harmonics: ["How detailed the daily rhythm is", "sharper daily shape", "rhythms clearly present in at least half the patients"],
+      deltrend: ["Memory of the level", "smoother, slower level", "the measured noise vs how much the level moves"],
+      delseas: ["Memory of the daily shape", "daily shape changes less", "how much the daily shape changes from day to day"],
+      r_scale: ["Assumed noise, × the method's own estimate", "smoother output", "set so the assumed noise equals the measured noise"],
+      C0_var: ["How unsure the level is at the start of a segment", "first readings move the level more", "how far the level typically is from the median"],
+      C0_seas_var: ["Plausible daily-rhythm size at segment start (per wave)", "short segments can show bigger rhythms", "typical size of each daily wave"] }],
+  kim: ["Two-state switching filter (Kim filter)",
+    "Assumes HRV switches between a low and a high state (e.g. awake and asleep) and tracks both.",
+    ["Each state has its own level, which drifts but is pulled back to that state's average.",
+     "After each reading, update the chance of being in each state.",
+     "The output is the level of both states, weighted by those chances."],
+    { phi: ["How long a deviation from the state's average lasts (close to 1 = long)", "level wanders longer", "how long the true level stays similar"],
+      stickiness: ["Chance of staying in the same state at the next reading", "states switch less often", "the same: how long the level stays similar"],
+      q_scale: ["How fast the level may move", "follows the readings more closely", "how much the level moves per reading"],
+      r_scale: ["Assumed noise", "smoother output", "set so the assumed noise equals the measured noise"],
+      var_ratio: ["Noise in the high state relative to the low state", "high state assumed noisier", "noise of readings above vs below the patient's median"] }],
+  krlst: ["Online smooth-curve fit (kernel recursive least squares)",
+    "Fits a smooth curve through recent readings and gradually forgets older ones.",
+    ["Keep a limited set of recent readings.",
+     "Fit a smooth curve through them, assuming readings close in time are similar.",
+     "Older readings fade away, so the curve can follow a drifting baseline."],
+    { lengthscale_min: ["How far apart in time (min) readings still inform each other", "smoother", "how long the true level stays similar"],
+      c: ["Noise relative to real variation", "smoother", "measured noise ÷ how far the level wanders"],
+      forgetting_lambda: ["How much old information is kept per reading (1 = never forget)", "forgets more slowly", "how similar one day is to the next"],
+      budget: ["How many past readings it remembers", "more memory, slower", "the readings that still matter given the time span above"] }],
+  logmhw: ["Level + trend + daily profile forecasting (Holt-Winters)",
+    "Classic forecasting: a level, a slowly fading trend and a time-of-day profile, each updated by a fixed fraction.",
+    ["Start from the patient's own average day (one value per 10-minute slot).",
+     "After each reading, nudge the level, the trend and that slot's daily value toward what was seen.",
+     "The smoothed value = level + trend + daily value (on a log scale)."],
+    { alpha: ["How much each reading moves the level", "follows the readings more closely", "the method's own fit on each patient, median across patients"],
+      beta: ["How much each reading moves the trend", "trend reacts faster", "the same fit (0 = no trend needed)"],
+      phi: ["How fast the trend fades", "trend lasts longer", "the same fit"],
+      gamma: ["How much each reading updates its time-of-day value", "daily profile adapts faster", "how much the daily shape changes from day to day (0 = it doesn't)"],
+      buckets_per_day: ["Time-of-day slots in the daily profile", "finer profile", "one per 10-minute reading slot"] }],
+  ossa: ["Keep-the-repeating-patterns filter (online singular spectrum analysis)",
+    "Keeps the patterns that repeat in the last day of readings and treats the rest as noise.",
+    ["Take the readings of the last day (or the segment so far, if shorter).",
+     "Split them into patterns, strongest first (singular value decomposition).",
+     "Keep the strongest few; the newest point of that rebuilt signal is the estimate."],
+    { window_max: ["Longest stretch of readings looked at", "slower patterns kept, slower to react", "one day of readings"],
+      n_components: ["How many patterns are kept as signal", "less smoothing", "the number of patterns that stand out from the measured noise"] }],
+  rspf: ["Regime-switching particle filter",
+    "500 guesses of the patient's current state (activity regime, level, daily rhythm), re-weighted by each reading.",
+    ["Each guess (\"particle\") has a regime, a level pulled toward that regime's average, and a daily rhythm.",
+     "Guesses that explain the new reading well gain weight; poor ones are replaced.",
+     "The estimate is the weighted average, kept within the patient's own min–max range."],
+    { K: ["Number of HRV regimes", "more baseline levels to switch between", "sleep / rest / active HRV differ clearly"],
+      stickiness: ["Chance of staying in the same regime", "regimes switch less often", "how long the true level stays similar"],
+      reversion_tau_min: ["Minutes for the level to return to its regime average", "stiffer level", "how long the true level stays similar"],
+      sigma_level_frac: ["Level movement per reading, as a share of the patient's range", "follows the readings more closely", "how much the level moves in 10 min"],
+      sigma_seas: ["How fast the daily rhythm may change", "rhythm adapts faster", "how much the daily shape changes from day to day"],
+      circ_init_frac: ["Starting size of the daily rhythm", "bigger rhythm assumed at first", "typical 24 h wave size relative to the range"] }],
+};
+const FIXED_TEXT = { ewma_c: "spike threshold", winsor: "clip extreme readings at", huber_delta: "spike threshold, in noise units",
+  l_frac: "pattern length as share of window", period_min: "daily cycle, min", optimize: "fit per patient",
+  ref_dt_min: "time between readings, min" };
+
+const fmt = v => v == null ? "–" : Array.isArray(v) ? v.map(fmt).join(" / ") : typeof v === "boolean" ? (v ? "yes" : "no")
+  : typeof v === "number" ? String(+v.toPrecision(3)) : String(v);
+const esc = s => String(s).replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+const hours = m => (m / 60).toFixed(1) + " h";
+
+// ---- key numbers ----
+const harmonics = c => Object.entries(S[c].frac_harm_sig).filter(([, f]) => f >= 0.5).length;
+const core = [
+  ["Share of the reading-to-reading variation that is noise", c => (100 * S[c].R_raw / (S[c].R_raw + S[c].S_raw)).toFixed(0) + "%"],
+  ["How long the true level stays similar (memory)", c => hours(S[c].tau_log)],
+  ["How long a day's level is remembered (day-to-day memory)", c => (S[c].tau_day_min / 1440).toFixed(1) + " days"],
+  ["Daily rhythm waves present in most patients", c => harmonics(c) + " of 3"],
+  ["Distinct activity states (sleep / rest / active)", c => S[c].n_distinct_states],
+  ["Time between readings", c => S[c].dt_min + " min"],
+  ["Typical segment length (median)", c => hours(S[c].chunk_len_quantiles["0.5"] * S[c].dt_min)],
+];
+document.getElementById("core").innerHTML = "<tr><th>Measured</th>" + COHORTS.map(([, l]) => `<th>${l}</th>`).join("") + "</tr>" +
+  core.map(([n, f]) => `<tr><td>${n}</td>` + COHORTS.map(([c]) => `<td class="num">${f(c)}</td>`).join("") + "</tr>").join("");
+
+// ---- overview ----
 const methods = Object.keys(DATA.settings.combined);
+const shown = m => DATA.settings.combined[m].map((r, i) => [r, i]).filter(([r]) => M[m][3][r.knob]);
+const live = m => DATA.trunc[m] === 0 ? "yes" : "almost";
+document.getElementById("overview").innerHTML =
+  "<tr><th>Method</th><th>What it does</th><th>Live-safe</th><th>Settings derived</th><th>Closeness to ideal: default → derived</th></tr>" +
+  methods.map(m => {
+    const d = (DATA.distance.combined || {})[m] || {};
+    const cls = d.derived < d.default ? "good" : d.derived > d.default ? "bad" : "";
+    return `<tr><td><a href="#${m}">${m}</a></td><td>${esc(M[m][1])}</td><td>${live(m)}</td><td class="num">${shown(m).length}</td>` +
+      `<td class="num">${fmt(d.default)} → <span class="${cls}">${fmt(d.derived)}</span></td></tr>`;
+  }).join("");
 document.getElementById("toc").innerHTML = methods.map(m => `<a href="#${m}">${m}</a>`).join("");
 
-function defaultOf(m, knob) {
-  const d = DATA.defaults[m] || {};
-  const parts = knob.split(" / ");
-  const v = parts.map(p => d[p]);
-  return v.every(x => x === undefined) ? "–" : fmt(parts.length > 1 ? v : v[0]);
-}
-function render() {
-  const coh = document.getElementById("cohort").value;
-  document.getElementById("methods").innerHTML = methods.map(m => {
-    const rows = DATA.settings.combined[m];
-    const dev = DATA.trunc[m];
-    const causal = dev === 0 ? "Truncation-exact: a value at time t never changes when later readings arrive."
-      : `Not truncation-exact (max deviation ${dev}): it filters forward, but per-patient scales (noise, range, mean) are ` +
-        `fitted on the whole recording, so a value at time t can move when later readings arrive.`;
-    const body = rows.map((r, i) => {
-      const val = c => fmt(DATA.settings[c][m][i].value);
-      return `<tr><td class="knob">${esc(r.knob)}</td><td>${esc(r.meaning)}</td><td>${esc(r.effect)}</td><td>${tag(r.kind)}</td>` +
-        `<td class="num">${defaultOf(m, r.knob)}</td><td class="num">${val("aiims")}</td><td class="num">${val("copd")}</td><td class="num">${val("combined")}</td>` +
-        `<td class="why">${esc(DATA.settings[coh][m][i].how)}</td></tr>`;
-    }).join("");
-    return `<div class="card" id="${m}"><h2>${m} — ${esc(ABOUT[m][0])}</h2>
-      <p class="how-it-works">${esc(ABOUT[m][1])}</p><p class="causal">${causal}</p>
-      <div class="tablewrap"><table><tr><th>setting</th><th>what it is</th><th>raising / changing it</th><th>type</th>
-      <th>default</th><th>AIIMS</th><th>COPD</th><th>AIIMS + COPD</th><th>how it was derived</th></tr>${body}</table></div></div>`;
+// ---- one card per method ----
+document.getElementById("methods").innerHTML = methods.map(m => {
+  const [full, one, steps, knobs] = M[m];
+  const defs = DATA.defaults[m] || {};
+  const rows = shown(m).map(([r, i]) => {
+    const [what, up, from] = knobs[r.knob];
+    const cells = COHORTS.map(([c]) => { const v = DATA.settings[c][m][i].value;
+      return `<td class="num${same(v, defs[r.knob]) ? "" : " changed"}">${fmt(v)}</td>`; }).join("");
+    return `<tr><td class="knob">${r.knob}</td><td>${esc(what)}</td><td>${esc(up)}</td><td class="num">${fmt(defs[r.knob])}</td>${cells}<td>${esc(from)}</td></tr>`;
   }).join("");
-}
-document.getElementById("cohort").onchange = render;
-render();
+  const fixed = DATA.settings.combined[m].filter(r => !knobs[r.knob] && FIXED_TEXT[r.knob] && r.kind !== "numerical")
+    .map(r => `<code>${r.knob}</code> = ${fmt(r.value)} (${FIXED_TEXT[r.knob]})`).join(" · ");
+  const how = shown(m).map(([r]) => `<li><code>${r.knob}</code>: ${esc(r.how)}</li>`).join("");
+  const d = (DATA.distance.combined || {})[m] || {};
+  return `<div class="card" id="${m}"><h2>${m} — ${esc(full)}</h2>
+    <p class="plain">${esc(one)}</p>
+    <p><span class="badge">live-safe: ${live(m)}</span> <span class="badge">closeness to ideal: ${fmt(d.default)} default → ${fmt(d.derived)} derived</span></p>
+    <h3>How it works</h3><ol>${steps.map(s => `<li>${esc(s)}</li>`).join("")}</ol>
+    <h3>Settings we derived</h3>
+    <div class="tablewrap"><table><tr><th>Setting</th><th>What it controls</th><th>Turning it up →</th><th>Default</th>
+      ${COHORTS.map(([, l]) => `<th>${l}</th>`).join("")}<th>Our value comes from</th></tr>${rows}</table></div>
+    ${fixed ? `<p class="muted">Kept fixed (not measurable from the data): ${fixed}</p>` : ""}
+    <details><summary>Exact derivation (AIIMS + COPD numbers)</summary><ul>${how}</ul></details></div>`;
+}).join("");
 </script>
 </body>
 </html>
