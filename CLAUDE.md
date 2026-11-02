@@ -51,7 +51,7 @@ wearable/
   experiment.py    the ONLY thing that connects steps: chain() and the sweeps
   selftest.py      asserts the five rules
   __main__.py      the CLI
-scripts/           reporting: eda, plot_patient, smoother_comparison_report
+scripts/           reporting: eda, plot_patient, smoother_comparison_report, smoothing_study
 legacy/            retired code (see legacy/README.md)
 docs/              method notes, the PDF and DOCX
 tests/             smoke tests — enforce rules 1, 2, 4, 5
@@ -157,6 +157,10 @@ circadian, volatility and activity-state statistics — runs defaults vs derived
 per patient, and writes `data/reports/smoothing/` (settings, metrics, `methods.html`,
 and `dashboard/index.html`, which loads `patients/<pid>.js` so it works from file://).
 `smooth.run(..., patients=[...])` restricts a run to a cohort; the id list is keyed.
+The two HTML pages are **templates in `scripts/`** (`smoothing_dashboard.html`,
+`smoothing_methods.html`): `report` copies the dashboard and injects data into the
+methods page at the `/*__DATA__*/null` placeholder. Edit the templates, not the
+generated copies under `data/reports/smoothing/`.
 
 ## What the cache key does not see
 
@@ -695,7 +699,12 @@ not in the smoothing registry). Copy them back before deleting `data/old/`.
 spark and pass1 output in one `data/processed/`.
 
 **HRV data is sensitive — never commit anything under `data/` — raw cohorts, the artifact store, or any
-patient CSVs to a public remote.**
+patient CSVs to a public remote.** The one exception is an allowlist in `.gitignore`: seven
+cohort-level files in `data/reports/smoothing/` (`cohort_stats.json`, `ideal_reference.json`,
+`methods.html`, `metrics_summary.csv`, `runs.csv`, `settings.csv`, `settings.json`), which carry
+no patient ids or readings. The dashboard, `patient_stats.json` and `metrics_per_patient.csv`
+are per-patient and must stay out. Before you add anything to that allowlist, check that it is
+aggregate-only.
 
 ## Conventions
 
