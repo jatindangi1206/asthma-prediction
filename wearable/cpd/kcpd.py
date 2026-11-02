@@ -39,12 +39,17 @@ physiological channels are fused into the residual vector.
 
 import numpy as np
 
-WINDOW = 18                  # 3 hours of 10-min samples per side
-N_PERM = 80                  # permutations to build the MMD null (mean/std)
-STRIDE = 3                   # evaluate every STRIDE points (magnitude held forward)
-MIN_EFFECT_Z = 10.0          # fire only if MMD >= this many null-std above null mean
-STUDENTIZE = True            # divide residual by a causal rolling std first
-STUD_HALFLIFE = 36           # ~6 h half-life for the rolling-std envelope
+# The knobs, tuned on HRV at its 10-min cadence. `window`, `stride` and `stud_halflife`
+# are in SAMPLES, so a faster channel needs its own — `config.CPD_SETTINGS` overrides
+# these per channel.
+DEFAULTS = {
+    "window": 18,             # 3 hours of 10-min samples per side
+    "n_perm": 80,             # permutations to build the MMD null (mean/std)
+    "stride": 3,              # evaluate every `stride` points (magnitude held forward)
+    "min_effect_z": 10.0,     # fire only if MMD >= this many null-std above null mean
+    "studentize": True,       # divide residual by a causal rolling std first
+    "stud_halflife": 36,      # ~6 h half-life for the rolling-std envelope
+}
 PHENOTYPE = "KCPD_Distribution_Shift"
 RNG_SEED = 0                 # re-seeded PER detect() call — see below
 # NOTE: a module-level RNG made results depend on how many chunks/patients/methods
@@ -82,17 +87,19 @@ def _studentize(values, halflife):
     return values / s
 
 
-def detect(time, values, priors=None):
+def detect(time, values, priors=None, **params):
     """Online studentized two-window MMD on the residual. Returns the rich dict."""
+    p = {**DEFAULTS, **params}
+    N_PERM, STRIDE, MIN_EFFECT_Z = p["n_perm"], p["stride"], p["min_effect_z"]
     N = len(values)
     out = {"anomaly": np.zeros(N, int),
            "phenotype": np.full(N, "normal", dtype=object),
            "magnitude": np.zeros(N), "severity": np.zeros(N)}
-    w = WINDOW
+    w = p["window"]
     if N < 2 * w:
         return out
 
-    sig = _studentize(values, STUD_HALFLIFE) if STUDENTIZE else values
+    sig = _studentize(values, p["stud_halflife"]) if p["studentize"] else values
     idx2 = np.arange(2 * w)
     rng = np.random.default_rng(RNG_SEED)      # fresh per call -> order-independent
 
@@ -106,8 +113,8 @@ def detect(time, values, priors=None):
 
         null = np.empty(N_PERM)
         for j in range(N_PERM):
-            p = rng.permutation(idx2)
-            null[j] = _mmd2_from_K(K[np.ix_(p, p)], w)
+            perm = rng.permutation(idx2)
+            null[j] = _mmd2_from_K(K[np.ix_(perm, perm)], w)
         null_mean = null.mean(); null_std = null.std() + 1e-12
         z = (obs - null_mean) / null_std                  # effect size vs the null
 
@@ -123,7 +130,6 @@ def detect(time, values, priors=None):
 
 # --- registry metadata (auto-discovered; see wearable/registry.py) ---
 LABEL = "Studentized two-window MMD"
-DEFAULTS = {}
 PHENOTYPES = (
     'KCPD_Distribution_Shift',
 )

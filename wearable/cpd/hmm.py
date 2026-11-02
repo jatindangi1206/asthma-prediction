@@ -21,14 +21,20 @@ from hmmlearn.hmm import GaussianHMM
 
 logging.getLogger("hmmlearn").setLevel(logging.ERROR)   # silence per-chunk convergence logs
 
-STICKINESS = 0.95            # P(stay in current state)
-STATE1_VAR_MULT = 9.0       # State-1 variance = (3*std)^2 = 9 * burn-in variance
+# The knobs, tuned on HRV at its 10-min cadence; `config.CPD_SETTINGS` overrides them
+# per channel. Stickiness is per SAMPLE, so its implied dwell time scales with cadence.
+DEFAULTS = {
+    "stickiness": 0.95,       # P(stay in current state)
+    "state1_var_mult": 9.0,   # State-1 variance = (3*std)^2 = 9 * burn-in variance
+}
 PHENOTYPE = "HMM_State_Transition"
 _MIN_ROWS = 12
 
 
-def detect(time, values, priors=None):
+def detect(time, values, priors=None, **params):
     """2-state sticky HMM on the residual; flag the high-variance (State 1) regime."""
+    p = {**DEFAULTS, **params}
+    stick = p["stickiness"]
     N = len(values)
     out = {"anomaly": np.zeros(N, int),
            "phenotype": np.full(N, "normal", dtype=object),
@@ -44,10 +50,10 @@ def detect(time, values, priors=None):
                             n_iter=100, random_state=42,
                             init_params="", params="t")      # emissions HARDCODED; EM learns only transitions
         model.startprob_ = np.array([0.5, 0.5])
-        model.transmat_ = np.array([[STICKINESS, 1 - STICKINESS],
-                                    [1 - STICKINESS, STICKINESS]])
+        model.transmat_ = np.array([[stick, 1 - stick],
+                                    [1 - stick, stick]])
         model.means_ = np.array([[0.0], [0.0]])              # both states centred at 0
-        model.covars_ = np.array([[var0], [var0 * STATE1_VAR_MULT]])  # calm vs volatile
+        model.covars_ = np.array([[var0], [var0 * p["state1_var_mult"]]])  # calm vs volatile
 
         x = values.reshape(-1, 1)
         model.fit(x)
@@ -70,7 +76,6 @@ def detect(time, values, priors=None):
 
 # --- registry metadata (auto-discovered; see wearable/registry.py) ---
 LABEL = "Two-state Gaussian HMM"
-DEFAULTS = {}
 PHENOTYPES = (
     'HMM_State_Transition',
 )

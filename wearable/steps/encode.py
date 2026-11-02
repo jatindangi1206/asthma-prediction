@@ -90,6 +90,7 @@ def run(method: str, signal: str = DEFAULT_CHANNEL, days: int = DAYS,
             f"choose one of {list(SMOOTHABLE)}. The others are ingested and become "
             f"day features in `join`, but have no level to estimate (H1)")
     spec = registry.get("encoders", method)
+    name = method if signal == DEFAULT_CHANNEL else f"{method}@{signal}"
     params = {**spec.params(**overrides), "signal": signal,
               "days": int(days), "profile": int(profile)}
     inputs = ([input_artifact.ref] if input_artifact is not None else
@@ -97,15 +98,15 @@ def run(method: str, signal: str = DEFAULT_CHANNEL, days: int = DAYS,
                 "key": str(PROCESSED_DIR)}])
 
     if not force:
-        hit = store.find(STEP, method, params, inputs, spec.source_hash)
+        hit = store.find(STEP, name, params, inputs, spec.source_hash)
         if hit is not None:
-            print(f"[encode/{method}] reusing {hit.key[:12]} "
+            print(f"[encode/{name}] reusing {hit.key[:12]} "
                   f"({hit.manifest['stats'].get('n_rows')} patient-days)")
             return hit
 
     ctx = int(days) * int(profile)
     ceiling = getattr(spec.load(), "CONTEXT", None)
-    print(f"\n[encode/{method}] {spec.label}  signal={signal}")
+    print(f"\n[encode/{name}] {spec.label}  signal={signal}")
     print(f"  window  {days} days x {profile} slots = {ctx} points"
           + (f"; model takes {ceiling} (mode={params.get('mode')})" if ceiling else ""))
 
@@ -113,12 +114,12 @@ def run(method: str, signal: str = DEFAULT_CHANNEL, days: int = DAYS,
     print(f"  input   {len(index):,} patient-days, "
           f"{100 * np.isfinite(series).mean():.1f}% of slots observed")
 
-    art = store.open_artifact(STEP, method, params, inputs, spec.source_hash,
+    art = store.open_artifact(STEP, name, params, inputs, spec.source_hash,
                               label=spec.label)
     emb = np.asarray(spec.entry()(series, **spec.params(**overrides)), dtype=np.float32)
     if emb.ndim != 2 or len(emb) != len(index):
         art.fail(f"encoder returned {emb.shape} for {len(index)} windows")
-        raise RuntimeError(f"encode/{method}: expected ({len(index)}, d), got {emb.shape}")
+        raise RuntimeError(f"encode/{name}: expected ({len(index)}, d), got {emb.shape}")
 
     table = pd.concat(
         [index, pd.DataFrame(emb, columns=[f"e{i:04d}" for i in range(emb.shape[1])])],

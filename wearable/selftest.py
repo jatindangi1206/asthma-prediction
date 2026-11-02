@@ -540,6 +540,69 @@ def _check_window() -> None:
           f"horizon 1..{config.HORIZON} narrows the label, never the day set")
 
 
+def _check_cpd_settings() -> None:
+    """Each channel's CPD block is legal, reaches the detectors, and a typo is loud."""
+    from wearable.steps import detect as D
+
+    for ch in config.CPD_SETTINGS:
+        assert ch in config.CHANNELS, f"CPD_SETTINGS has unknown channel {ch!r}"
+        D.cpd_settings(ch, cpd.DEFAULT_ENSEMBLE)      # raises on any unknown name
+    # A detector handed its own DEFAULTS behaves exactly as with none: settings are
+    # plumbing, so moving a knob into the table can never move a result.
+    rng = np.random.default_rng(3)
+    t, v = np.arange(300) * 10.0, rng.normal(0, 1, 300)
+    v[150:] += 4
+    for name, mod in cpd.load_ensemble():
+        a, b = mod.detect(t, v, {"sigma0": 1.0}), mod.detect(t, v, {"sigma0": 1.0},
+                                                             **mod.DEFAULTS)
+        assert all(np.array_equal(a[k], b[k]) for k in a), f"{name}: DEFAULTS != none"
+    # An override reaches the method; a misspelt one raises instead of being ignored.
+    config.CPD_SETTINGS["_t"] = {"kcpd": {"window": 99}, "detect": {"burn_in_n": 7}}
+    try:
+        step, per = D.cpd_settings("_t", ("kcpd", "bocpd"))
+        assert per["kcpd"]["window"] == 99 and step["burn_in_n"] == 7, (step, per)
+        assert per["bocpd"] == registry.get("cpd", "bocpd").defaults
+        config.CPD_SETTINGS["_t"] = {"kcpd": {"windw": 99}}
+        try:
+            D.cpd_settings("_t", ("kcpd",))
+            raise AssertionError("a misspelt CPD setting was silently ignored")
+        except ValueError:
+            pass
+    finally:
+        del config.CPD_SETTINGS["_t"]
+    (s_hrv, p_hrv), (s_hr, p_hr) = (D.cpd_settings(c, cpd.DEFAULT_ENSEMBLE)
+                                    for c in ("hrv", "hr"))
+    differ = {m for m in p_hrv if p_hrv[m] != p_hr[m]} | ({"detect"} if s_hrv != s_hr else set())
+    print(f"  cpd          settings per channel {sorted(config.CPD_SETTINGS)}; "
+          f"hr differs from hrv in {sorted(differ) or 'nothing yet'}")
+
+
+def _check_join_embedding() -> None:
+    """An embedding already covers its window: join must not lag it, and must not let it
+    displace the raw block of its channel."""
+    from wearable.steps import join as J
+
+    class _Stub:
+        def __init__(self, step, method, table, grain=None):
+            self.step, self.method, self._t = step, method, table
+            self.manifest = {"tables": ["t"], "stats": {"signal": "hr"},
+                             **({"grain": grain} if grain else {})}
+
+        def read_table(self, _):
+            return self._t.copy()
+
+    days = pd.to_datetime(["2026-01-01", "2026-01-02", "2026-01-03"])
+    sm = _Stub("smooth", "x@hr", pd.DataFrame({
+        "p_id": "a", "createdTime": days + pd.Timedelta(hours=1), "v": [1.0, 2.0, 3.0]}))
+    en = _Stub("encode", "m@hr", pd.DataFrame({
+        "p_id": "a", "date": days, "e0000": [7.0, 8.0, 9.0]}), grain="day")
+    f = J._features([sm, en], channels=(), days=3)
+    assert "en_m@hr_e0000" in f.columns, list(f.columns)
+    assert not [c for c in f.columns if c.startswith("en_") and "_d" in c[-3:]], \
+        f"an embedding was lagged: {list(f.columns)}"
+    assert "sm_x@hr_v_mean_d2" in f.columns, "the other features must still be lagged"
+
+
 def _check_experiment() -> None:
     """The experiment axes: every input variant is a legal recipe, nothing leaks."""
     from wearable import experiment
@@ -577,6 +640,16 @@ def _check_experiment() -> None:
     assert all(1 <= int(h) <= config.HORIZON for h in config.WINDOW_HORIZON), \
         config.WINDOW_HORIZON
     assert {"days", "horizon", "profile"} <= set(experiment.CELL), experiment.CELL
+    # Paths process more than one channel, so the channel set identifies a cell too.
+    assert "signals" in experiment.CELL, experiment.CELL
+    # Every foundation model has its own named variant, and a family name expands to
+    # all of them — so two forecasters can never land in one `input` row.
+    from wearable import encoders, forecasting
+    assert experiment._expand(["surprise+cpd"]) == \
+        [f"surprise+cpd@{f}" for f in forecasting.names()]
+    assert experiment._expand(["embed"]) == [f"embed@{e}" for e in encoders.names()]
+    assert experiment._expand(["raw"]) == ["raw"]
+    _check_join_embedding()
     print(f"  experiment   {len(experiment.INPUTS)} input variants x "
           f"{len(TARGETS)} tasks x {len(models.names())} models x "
           f"{len(config.WINDOW_DAYS)} windows; "
@@ -592,6 +665,7 @@ def run() -> None:
     _check_split()
     _check_store()
     _check_vote()
+    _check_cpd_settings()
     _check_metrics()
     _check_event_metrics()
     _check_channels()

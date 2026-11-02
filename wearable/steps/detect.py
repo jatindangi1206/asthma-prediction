@@ -24,8 +24,8 @@ import pandas as pd
 from tqdm import tqdm
 
 from wearable import cpd, registry, store
-from wearable.config import (BURN_IN_N, CHANNELS, DEFAULT_CHANNEL, GAP_THRESHOLD_MIN,
-                             POP_N0, POP_SIGMA0_DEFAULT, PROCESSED_DIR,
+from wearable.config import (BURN_IN_N, CHANNELS, CPD_SETTINGS, DEFAULT_CHANNEL,
+                             GAP_THRESHOLD_MIN, POP_N0, POP_SIGMA0_DEFAULT, PROCESSED_DIR,
                              processed_files, processed_pid)
 
 warnings.filterwarnings("ignore")
@@ -47,6 +47,28 @@ def signal_column(on: str, signal: str = DEFAULT_CHANNEL) -> str:
     if signal not in CHANNELS:
         raise ValueError(f"signal must be one of {sorted(CHANNELS)}, got {signal!r}")
     return SIGNALS[on].format(val=CHANNELS[signal], sig=signal)
+
+
+def cpd_settings(signal: str, methods) -> tuple[dict, dict]:
+    """-> (the step's cold-start knobs, {method: its settings}) for one channel.
+
+    Each detector's DEFAULTS, overridden by that channel's block in
+    `config.CPD_SETTINGS`. A name the detector does not have is an error, not a silent
+    no-op: a misspelt threshold would otherwise run the defaults and look tuned.
+    """
+    table = CPD_SETTINGS.get(signal, {})
+    unknown = set(table) - {"detect"} - set(registry.registry("cpd"))
+    if unknown:
+        raise ValueError(f"CPD_SETTINGS[{signal!r}]: unknown detectors {sorted(unknown)}")
+    step = {"burn_in_n": BURN_IN_N, "pop_n0": POP_N0}
+    for name, over, known in [("detect", table.get("detect", {}), step)] + [
+            (m, table.get(m, {}), registry.get("cpd", m).defaults) for m in methods]:
+        bad = set(over) - set(known)
+        if bad:
+            raise ValueError(f"CPD_SETTINGS[{signal!r}][{name!r}]: unknown settings "
+                             f"{sorted(bad)}; available: {sorted(known)}")
+    step.update(table.get("detect", {}))
+    return step, {m: registry.get("cpd", m).params(**table.get(m, {})) for m in methods}
 
 
 def _population_sigma0(frame: pd.DataFrame, col: str) -> float:
@@ -95,7 +117,9 @@ def _vote(per: list[dict], armed: np.ndarray):
     return fired.any(0).astype(int), primary, mag
 
 
-def _detect_patient(df: pd.DataFrame, col: str, methods, pop_sigma0: float):
+def _detect_patient(df: pd.DataFrame, col: str, methods, pop_sigma0: float,
+                    burn_in_n: int = BURN_IN_N, pop_n0: int = POP_N0,
+                    settings: dict | None = None):
     """CPD for one patient on one column. Per-chunk reset (H8), cumulative burn-in."""
     df = df.sort_values("createdTime").reset_index(drop=True)
     df = _ensure_chunk_id(df)
@@ -109,19 +133,19 @@ def _detect_patient(df: pd.DataFrame, col: str, methods, pop_sigma0: float):
     elapsed = ((df["createdTime"] - df["createdTime"].iloc[0])
                .dt.total_seconds().to_numpy() / 60.0)
 
-    # Cold start: the first BURN_IN_N VALID samples (counted across chunks, ignoring
+    # Cold start: the first `burn_in_n` VALID samples (counted across chunks, ignoring
     # MNAR gaps) set the noise floor, shrunk toward the population prior.
-    burn = sig[obs_idx[:BURN_IN_N]]
+    burn = sig[obs_idx[:burn_in_n]]
     n = int(burn.size)
     m_obs = float(np.median(burn))
     sig_obs = float(max(1.4826 * np.median(np.abs(burn - m_obs)), np.std(burn), 1e-3))
-    sigma0 = float(np.sqrt((POP_N0 * pop_sigma0 ** 2 + n * sig_obs ** 2) / (POP_N0 + n)))
-    m0 = float(n * m_obs / (POP_N0 + n))
+    sigma0 = float(np.sqrt((pop_n0 * pop_sigma0 ** 2 + n * sig_obs ** 2) / (pop_n0 + n)))
+    m0 = float(n * m_obs / (pop_n0 + n))
     priors = {"m0": m0, "sigma0": sigma0}
 
     armed = np.zeros(len(df), bool)
-    if obs_idx.size > BURN_IN_N:
-        armed[obs_idx[BURN_IN_N:]] = True
+    if obs_idx.size > burn_in_n:
+        armed[obs_idx[burn_in_n:]] = True
 
     per = {name: {"anomaly": np.zeros(len(df), int),
                   "phenotype": np.full(len(df), "normal", dtype=object),
@@ -135,7 +159,7 @@ def _detect_patient(df: pd.DataFrame, col: str, methods, pop_sigma0: float):
         t = elapsed[idx] - elapsed[idx[0]]
         v = sig[idx]
         for name, module in methods:
-            r = module.detect(t, v, priors)
+            r = module.detect(t, v, priors, **(settings or {}).get(name, {}))
             for k in ("anomaly", "phenotype", "magnitude", "severity"):
                 per[name][k][idx] = r[k]
 
@@ -204,9 +228,12 @@ def run(methods=cpd.DEFAULT_ENSEMBLE, on: str = "residual", input_artifact=None,
     col = signal_column(on, signal)
 
     # The artifact's "method" is the ensemble it ran, so variants sit side by side.
-    name = "+".join(methods)
+    # A non-default channel is suffixed as in smooth/forecast, so an HR and an HRV run
+    # of the same ensemble never share a name — or a column prefix in `join`.
+    name = "+".join(methods) + ("" if signal == DEFAULT_CHANNEL else f"@{signal}")
+    step_knobs, settings = cpd_settings(signal, methods)
     params = {"on": on, "signal_col": col, "methods": list(methods),
-              "burn_in_n": BURN_IN_N, "pop_n0": POP_N0}
+              **step_knobs, "settings": settings}
     if limit:
         params["limit_patients"] = int(limit)
     inputs = [input_artifact.ref] if input_artifact is not None else [
@@ -220,7 +247,7 @@ def run(methods=cpd.DEFAULT_ENSEMBLE, on: str = "residual", input_artifact=None,
             print(f"[detect/{name} on {on}] reusing {hit.key[:12]}")
             return hit
 
-    frame = _load_input(input_artifact, on)
+    frame = _load_input(input_artifact, on, signal=signal)
     if limit:
         frame = frame[frame["p_id"].isin(sorted(frame["p_id"].unique())[:int(limit)])]
     loaded = [(m, registry.get("cpd", m).load()) for m in methods]
@@ -233,7 +260,7 @@ def run(methods=cpd.DEFAULT_ENSEMBLE, on: str = "residual", input_artifact=None,
 
     outs = []
     for _, g in tqdm(frame.groupby("p_id", sort=True), desc=f"detect {on}"):
-        r = _detect_patient(g, col, loaded, pop)
+        r = _detect_patient(g, col, loaded, pop, settings=settings, **step_knobs)
         if r is not None:
             outs.append(r)
 

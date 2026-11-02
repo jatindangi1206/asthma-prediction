@@ -14,6 +14,36 @@ BURN_IN_N = 144             # valid samples (24h at 10-min) to ARM, counted acro
 POP_N0 = 30                 # population-prior pseudo-count (shrinkage strength)
 POP_SIGMA0_DEFAULT = 15.0   # fallback prior if the cohort median is unavailable
 
+# ---- CPD settings, per channel -----------------------------------------------------
+# Change-point detection runs on each channel separately, and the channels differ ~10x
+# in cadence (HRV a reading per ~10 min, HR per ~1 min). Every count below is in
+# SAMPLES, so the same number means a different stretch of time on each channel —
+# which is why each channel has its own block. `detect` holds the step's cold-start
+# knobs; the others are the detectors' (see each module's DEFAULTS for what they mean).
+# A channel or detector missing here falls back to those DEFAULTS. Every value is part
+# of the detect cache key, so editing one recomputes only that channel's detection.
+# HR starts as an exact copy of HRV: identical until it is tuned.
+CPD_SETTINGS = {
+    "hrv": {
+        "detect": {"burn_in_n": BURN_IN_N, "pop_n0": POP_N0},
+        "bocpd":  {"hazard_lambda": 1000, "min_run": 6, "drop_frac": 0.5},
+        "kcpd":   {"window": 18, "n_perm": 80, "stride": 3, "min_effect_z": 10.0,
+                   "studentize": True, "stud_halflife": 36},
+        "kalman": {"r_scale": 1.0, "q_factor": 1e-3, "cusum_k": 0.5, "cusum_h": 3.0,
+                   "acf_win": 12, "acf_h": 0.6},
+        "hmm":    {"stickiness": 0.95, "state1_var_mult": 9.0},
+    },
+    "hr": {
+        "detect": {"burn_in_n": BURN_IN_N, "pop_n0": POP_N0},
+        "bocpd":  {"hazard_lambda": 1000, "min_run": 6, "drop_frac": 0.5},
+        "kcpd":   {"window": 18, "n_perm": 80, "stride": 3, "min_effect_z": 10.0,
+                   "studentize": True, "stud_halflife": 36},
+        "kalman": {"r_scale": 1.0, "q_factor": 1e-3, "cusum_k": 0.5, "cusum_h": 3.0,
+                   "acf_win": 12, "acf_h": 0.6},
+        "hmm":    {"stickiness": 0.95, "state1_var_mult": 9.0},
+    },
+}
+
 # ---- Experiment defaults -------------------------------------------------------
 # Held constant across a comparison, so only the method varies. The split comes from
 # the sorted patient list + SEED alone, never from feature content.
@@ -114,6 +144,9 @@ CHANNELS = {
 DEFAULT_CHANNEL = "hrv"
 # Channels a smoother, forecaster or encoder will accept: continuous and positive.
 SMOOTHABLE = ("hrv", "hr", "temp", "spo2", "steps")
+# The channels an experiment PATH processes (smooth / forecast / detect / encode), each
+# on its own and each its own feature block. `sweep ... --signals hrv` narrows it.
+PATH_SIGNALS = ("hrv", "hr")
 # What `join`'s raw baseline reads when nothing else is asked for.
 # EVERY MODEL GETS EVERY VARIABLE. The question is never "can HRV alone predict this" —
 # it is "can these measurements predict this". So join reads all of them by default and

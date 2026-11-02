@@ -25,26 +25,32 @@ Phenotypes (all three innovation-based change types in the write-up):
 import numpy as np
 
 _H = np.array([[1.0, 0.0]])
-R_SCALE = 1.0                 # R = (R_SCALE * burn-in std)^2 ; high vs the LOW Q below,
-                             #   so innovations are standardized ~N(0,1) under normal data
-Q_FACTOR = 1e-3              # "low" process noise
-CUSUM_K = 0.5               # CUSUM slack (in z units)
-CUSUM_H = 3.0              # CUSUM / spike threshold (≈3 std of baseline noise)
-ACF_WIN = 12                # rolling window for the lag-1 innovation autocorrelation (~2h)
-ACF_H = 0.6                 # autocorrelation breach threshold (white innovations ~ 0)
+# The knobs, tuned on HRV at its 10-min cadence; `config.CPD_SETTINGS` overrides them
+# per channel. `acf_win` is in SAMPLES; `q_factor` acts per minute of dt.
+DEFAULTS = {
+    "r_scale": 1.0,           # R = (r_scale * burn-in std)^2 ; high vs the LOW Q below,
+                              #   so innovations are standardized ~N(0,1) under normal data
+    "q_factor": 1e-3,         # "low" process noise
+    "cusum_k": 0.5,           # CUSUM slack (in z units)
+    "cusum_h": 3.0,           # CUSUM / spike threshold (≈3 std of baseline noise)
+    "acf_win": 12,            # rolling window for the lag-1 innovation autocorrelation (~2h)
+    "acf_h": 0.6,             # autocorrelation breach threshold (white innovations ~ 0)
+}
 PHENO_SPIKE = "Kalman_Volatility_Spike"
 PHENO_DRIFT = "Kalman_Gradual_Drift"
 PHENO_ACF = "Kalman_Autocorrelation_Change"
 
 
-def _transition_and_noise(dt):
+def _transition_and_noise(dt, q_factor):
     A = np.array([[1.0, dt], [0.0, 1.0]])
-    Q = Q_FACTOR * np.array([[dt ** 4 / 4.0, dt ** 3 / 2.0], [dt ** 3 / 2.0, dt ** 2]])
+    Q = q_factor * np.array([[dt ** 4 / 4.0, dt ** 3 / 2.0], [dt ** 3 / 2.0, dt ** 2]])
     return A, Q
 
 
-def detect(time, values, priors=None):
+def detect(time, values, priors=None, **params):
     """Track residual slope; flag volatility spikes and CUSUM trend breaks."""
+    p = {**DEFAULTS, **params}
+    CUSUM_K, CUSUM_H, ACF_WIN, ACF_H = p["cusum_k"], p["cusum_h"], p["acf_win"], p["acf_h"]
     N = len(values)
     out = {"anomaly": np.zeros(N, int),
            "phenotype": np.full(N, "normal", dtype=object),
@@ -54,7 +60,7 @@ def detect(time, values, priors=None):
 
     priors = priors or {}
     sigma0 = float(priors.get("sigma0", np.std(values) or 1.0)) or 1.0
-    R = np.array([[(R_SCALE * sigma0) ** 2]])             # HIGH measurement noise
+    R = np.array([[(p["r_scale"] * sigma0) ** 2]])             # HIGH measurement noise
 
     x_hat = np.array([[values[0]], [0.0]])               # level = first residual, slope = 0
     P = np.eye(2) * (sigma0 ** 2)
@@ -64,7 +70,7 @@ def detect(time, values, priors=None):
     for i in range(N):
         if i > 0:
             dt = float(time[i] - time[i - 1]) or 1.0
-            A, Q = _transition_and_noise(dt)
+            A, Q = _transition_and_noise(dt, p["q_factor"])
             x_pred = A @ x_hat
             P_pred = A @ P @ A.T + Q
         else:
@@ -112,7 +118,6 @@ def detect(time, values, priors=None):
 
 # --- registry metadata (auto-discovered; see wearable/registry.py) ---
 LABEL = "Kalman innovation CUSUM / autocorrelation"
-DEFAULTS = {}
 PHENOTYPES = (
     'Kalman_Volatility_Spike',
     'Kalman_Gradual_Drift',

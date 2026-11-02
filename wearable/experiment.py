@@ -27,12 +27,13 @@ from __future__ import annotations
 
 import pandas as pd
 
-from wearable import cpd, metrics, models, registry, smoothing
-from wearable.config import (DAYS, DEFAULT_CHANNEL, DEFAULT_JOIN_CHANNELS,
-                             HORIZON, PROFILE, PROFILE_BINS,
+from wearable import cpd, encoders, forecasting, metrics, models, registry, smoothing
+from wearable.config import (DAYS, DEFAULT_JOIN_CHANNELS,
+                             HORIZON, PATH_SIGNALS, PROFILE, PROFILE_BINS,
                              REPORTS_DIR, SEED, SEEDS, TEST_FRACTION, TEST_PCT,
                              WINDOW_DAYS, WINDOW_HORIZON)
 from wearable.steps import detect, evaluate, join, model as model_step, smooth
+from wearable.windowing import bins_for
 
 NO_SMOOTHING = "none"
 
@@ -183,9 +184,15 @@ def compare_smoothers_no_model(methods=None, force: bool = False,
 #   smoothed+cpd   a smoother, plus CPD on the smoothed signal
 #   residual+cpd   a smoother, plus CPD on raw - smoothed (the de-trended track)
 #
+#   forecast@<f>       a frozen forecaster's predicted / surprise / tail, no CPD
+#   surprise+cpd@<f>   the same, plus CPD on the surprise
+#   embed@<e>          a frozen encoder's embedding of the `days` window
+#
+# The foundation variants are generated from the pools, one per model, so the model is
+# in the variant name and lands in the `input` column — two forecasters never write the
+# same row. A bare family name (`--variants surprise+cpd`) expands to every model.
+#
 # Any other legal pair also works: inputs(smooth_method=..., detect_on=...).
-DEFAULT_FORECASTER = "timestral"
-DEFAULT_ENCODER = "moment"
 
 # A variant is a dict of four switches and nothing else, so adding one is one entry.
 #   smooth      run a smoother and hand join its artifact
@@ -198,12 +205,12 @@ INPUTS: dict[str, dict] = {
     "raw+cpd":      {"smooth": False, "detect_on": "raw", "forecast": None, "encode": None},
     "smoothed+cpd": {"smooth": True, "detect_on": "smoothed", "forecast": None, "encode": None},
     "residual+cpd": {"smooth": True, "detect_on": "residual", "forecast": None, "encode": None},
-    # frozen foundation routes
-    "forecast":     {"smooth": False, "detect_on": None, "forecast": DEFAULT_FORECASTER, "encode": None},
-    "surprise+cpd": {"smooth": False, "detect_on": "surprise", "forecast": DEFAULT_FORECASTER, "encode": None},
-    "embed":        {"smooth": False, "detect_on": None, "forecast": None, "encode": DEFAULT_ENCODER},
-    "embed+raw":    {"smooth": False, "detect_on": None, "forecast": None, "encode": DEFAULT_ENCODER},
 }
+for _f in forecasting.names():
+    INPUTS[f"forecast@{_f}"] = {"smooth": False, "detect_on": None, "forecast": _f, "encode": None}
+    INPUTS[f"surprise+cpd@{_f}"] = {"smooth": False, "detect_on": "surprise", "forecast": _f, "encode": None}
+for _e in encoders.names():
+    INPUTS[f"embed@{_e}"] = {"smooth": False, "detect_on": None, "forecast": None, "encode": _e}
 DEFAULT_SMOOTHING = "gammadglm"
 EXPERIMENT_DIR = REPORTS_DIR / "experiments"
 
@@ -221,40 +228,59 @@ def _as_list(value, default=None):
     return list(value) if isinstance(value, (list, tuple, set)) else [value]
 
 
+def _expand(variants) -> list[str]:
+    """A bare family name (`surprise+cpd`, `embed`) -> one variant per model in it."""
+    out = []
+    for v in variants:
+        family = [k for k in INPUTS if k.startswith(f"{v}@")]
+        out += family if v not in INPUTS and family else [v]
+    return out
+
+
 def inputs(smooth_method: str | None = None, detect_on: str | None = None,
            cpd_methods=cpd.DEFAULT_ENSEMBLE, force: bool = False,
            limit: int | None = None, smoothing_params: dict | None = None,
            forecast_method: str | None = None, encode_method: str | None = None,
-           signal: str = DEFAULT_CHANNEL, days: int = DAYS,
-           profile: int = PROFILE_BINS):
+           signals=PATH_SIGNALS, days: int = DAYS):
     """The artifacts `join` should receive for one input variant, in join order.
 
     Each of smoothing, forecasting and encoding is an independent frozen stage, and CPD
     runs on whichever of their columns `detect_on` names — `raw`/`smoothed`/`residual`
-    come from a smoother, `surprise`/`tail` from a forecaster.
+    come from a smoother, `surprise`/`tail` from a forecaster. The whole recipe runs
+    once per channel in `signals`, each channel on its own readings.
+
+    An encoder embeds the `days` window ending on each day, binned to fill its fixed
+    context (`bins_for(days, CONTEXT)`): the budget stays fixed and `days` changes the
+    resolution it is spent at.
     """
     from wearable.steps import encode as encode_step, forecast as forecast_step
     artifacts = []
-    sm = fc = None
-    if smooth_method and smooth_method != NO_SMOOTHING:
-        sm = smooth.run(smooth_method, force=force, limit=limit, signal=signal,
-                        **(smoothing_params or {}))
-        artifacts.append(sm)
-    if forecast_method:
-        fc = forecast_step.run(forecast_method, signal=signal, force=force, limit=limit)
-        artifacts.append(fc)
-    if detect_on:
-        src = {"raw": None, "smoothed": sm, "residual": sm,
-               "surprise": fc, "tail": fc}[detect_on]
-        if detect_on != "raw" and src is None:
-            need = "forecaster" if detect_on in ("surprise", "tail") else "smoother"
-            raise ValueError(f"detect_on={detect_on!r} needs a {need}; "
-                             f"use 'raw' to detect on the unsmoothed signal")
-        artifacts.append(detect.run(cpd_methods, on=detect_on, input_artifact=src,
-                                    force=force, limit=limit, signal=signal))
-    if encode_method:
-        artifacts.append(encode_step.run(encode_method, signal=signal, days=days,
-                                         profile=profile, force=force))
+    for signal in _as_list(signals):
+        sm = fc = None
+        if smooth_method and smooth_method != NO_SMOOTHING:
+            sm = smooth.run(smooth_method, force=force, limit=limit, signal=signal,
+                            **(smoothing_params or {}))
+            artifacts.append(sm)
+        if forecast_method:
+            fc = forecast_step.run(forecast_method, signal=signal, force=force,
+                                   limit=limit)
+            artifacts.append(fc)
+        if detect_on:
+            src = {"raw": None, "smoothed": sm, "residual": sm,
+                   "surprise": fc, "tail": fc}[detect_on]
+            if detect_on != "raw" and src is None:
+                need = "forecaster" if detect_on in ("surprise", "tail") else "smoother"
+                raise ValueError(f"detect_on={detect_on!r} needs a {need}; "
+                                 f"use 'raw' to detect on the unsmoothed signal")
+            artifacts.append(detect.run(cpd_methods, on=detect_on, input_artifact=src,
+                                        force=force, limit=limit, signal=signal))
+        if encode_method:
+            ceiling = getattr(registry.get("encoders", encode_method).load(),
+                              "CONTEXT", None)
+            artifacts.append(encode_step.run(
+                encode_method, signal=signal, days=days,
+                profile=bins_for(days, ceiling) if ceiling else PROFILE_BINS,
+                force=force))
     return artifacts
 
 
@@ -277,7 +303,7 @@ def run_one(variant: str = "raw", task: str = "detection",
             boot: int | None = None, stratify: bool = True,
             smoothing_params: dict | None = None, model_params: dict | None = None,
             days: int = DAYS, horizon: int = HORIZON, profile: int = PROFILE,
-            channels=DEFAULT_JOIN_CHANNELS, patients=None):
+            channels=DEFAULT_JOIN_CHANNELS, patients=None, signals=PATH_SIGNALS):
     """One cell of the experiment: one input variant, one task, one model, one fold.
 
     The seed drives both the split and the model, as in the reference design, so a cell
@@ -285,15 +311,18 @@ def run_one(variant: str = "raw", task: str = "detection",
     nothing else. `days` and `horizon` go to `join`, never to the model: the window is a
     property of the dataset, so every model in the pool reads every window unchanged.
     """
+    signals = _as_list(signals)
     arts = variant_inputs(variant, smoothing_method, cpd_methods=cpd_methods,
-                          force=force, limit=limit, smoothing_params=smoothing_params)
+                          force=force, limit=limit, smoothing_params=smoothing_params,
+                          signals=signals, days=days)
     j = join.run(arts, target=task, seed=seed, test_fraction=test_fraction,
                  force=force, stratify=stratify, days=days, horizon=horizon,
                  profile=profile, channels=channels, patients=patients)
     m = model_step.run(j, model=model, seed=seed, force=force,
                        **(model_params or {}))
     e = evaluate.run(m, force=force, boot=boot)
-    return {"variant": variant, "task": task, "model": model, "join": j,
+    return {"variant": variant, "task": task, "model": model,
+            "signals": ",".join(signals), "join": j,
             "model_artifact": m, "evaluate": e, "artifacts": arts}
 
 
@@ -312,7 +341,7 @@ def _cell_rows(res: dict, test_pct: int, seed: int) -> list[dict]:
     """One row for all test patients, plus one per cohort group."""
     js, ms = res["join"].manifest["stats"], res["model_artifact"].manifest["stats"]
     head = {"task": res["task"], "input": res["variant"], "model": res["model"],
-            "days": js.get("days"), "horizon": js.get("horizon"),
+            "signals": res["signals"], "days": js.get("days"), "horizon": js.get("horizon"),
             "profile": js.get("profile"),
             "test_pct": test_pct, "seed": seed,
             "n_features": ms.get("n_features"), "n_train": ms.get("n_train"),
@@ -365,6 +394,7 @@ def _grid(variants, model_names, task, test_pcts, seeds,
     going from 1 to 7 days of input did not quietly change what was being scored.
     """
     patients = _cohort(cohort)
+    variants = _expand(variants)
     rows, fold_shape, failures = [], {}, []
     for test_pct in test_pcts:
         for seed in seeds:
@@ -410,14 +440,14 @@ def _grid(variants, model_names, task, test_pcts, seeds,
 
 
 def summarise(runs: pd.DataFrame,
-              by=("task", "input", "model", "days", "horizon", "profile",
+              by=("task", "input", "model", "signals", "days", "horizon", "profile",
                   "test_pct", "group")):
     """Mean and SD over seeds of every score, plus the mean interval, as in the design."""
     if not len(runs):
         return runs
     by = [c for c in by if c in runs.columns]
-    head = {"task", "input", "model", "days", "horizon", "profile", "test_pct",
-            "seed", "group", "model_key"}
+    head = {"task", "input", "model", "signals", "days", "horizon", "profile",
+            "test_pct", "seed", "group", "model_key"}
     scores = [c for c in runs.columns
               if c not in head and not c.endswith(("_lo", "_hi"))]
     agg = {"seeds": ("seed", "nunique")}
@@ -430,8 +460,8 @@ def summarise(runs: pd.DataFrame,
     return runs.groupby(list(by), dropna=False).agg(**agg).reset_index()
 
 
-CELL = ["task", "input", "model", "days", "horizon", "profile", "test_pct", "seed",
-        "group"]
+CELL = ["task", "input", "model", "signals", "days", "horizon", "profile", "test_pct",
+        "seed", "group"]
 
 
 def _read_runs(runs_path):

@@ -524,8 +524,35 @@ that proves it with a stub and no weights (`python -m wearable.forecasting._base
 
 ### New input variants
 
-`forecast` · `surprise+cpd` · `embed` · `embed+raw`, beside the original five. A variant
-is four switches (`smooth`, `detect_on`, `forecast`, `encode`) and nothing else.
+`forecast@<f>` · `surprise+cpd@<f>` · `embed@<e>`, beside the original five, **generated
+from the pools**, so each forecaster and encoder has its own variant. Adding a model file
+adds its variant, and the model name sits in the `input` column of the runs table, so two
+forecasters never overwrite each other's row. A bare family name expands:
+`--variants surprise+cpd` runs all three forecasters. A variant is four switches
+(`smooth`, `detect_on`, `forecast`, `encode`) and nothing else.
+
+**Channels.** A path's recipe runs once per channel in `--signals` (default
+`config.PATH_SIGNALS = ("hrv", "hr")`), each on its own readings and as its own feature
+block. Every other channel still rides along raw. `signals` is a column of the runs table
+and part of a cell's identity. Detect and encode artifacts on a non-HRV channel are
+named `<method>@<signal>`, as smooth and forecast already were. Without that, HR and
+HRV would share a column prefix in `join`. Cost: HR has ~16x HRV's readings, so the first
+HR detect pass is the slow one (cached after).
+
+**CPD settings are per channel: `config.CPD_SETTINGS`.** Each detector's knobs are its
+`DEFAULTS` (tuned on HRV at 10-min cadence). `detect(time, values, priors, **params)`
+takes them, and `config.CPD_SETTINGS[<channel>][<detector>]` overrides them for one
+channel. A `detect` entry holds the step's `burn_in_n`/`pop_n0`. Window lengths, strides,
+half-lives, `min_run`, `acf_win` and `burn_in_n` are all counted in **samples**, so one
+number means ~10x less time on HR than on HRV. Untuned, HR fires ~60x more events than
+HRV (5-patient check: 39,312 vs 637). The resolved settings are in the detect cache key,
+so editing one channel's block recomputes only that channel. A misspelt name raises.
+`wearable list` prints both blocks.
+
+**The encoder window follows `--days`.** `experiment.inputs` embeds the `days` window
+ending on each day at `profile = bins_for(days, CONTEXT)`, so the ablation varies
+resolution, not budget. `join` does **not** lag an embedding (it already covers the
+window), and an embedding never displaces its channel's raw block (`join4`).
 
 ## A foundation model AS the classifier — `models/mantis_clf.py`
 

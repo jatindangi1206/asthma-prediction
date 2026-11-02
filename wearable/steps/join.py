@@ -181,14 +181,17 @@ def _day_features(table: pd.DataFrame, prefix: str,
 
 
 def _features(artifacts, profile: int = 0,
-              channels=DEFAULT_JOIN_CHANNELS) -> pd.DataFrame:
-    """Every input's day features side by side, one row per patient-day.
+              channels=DEFAULT_JOIN_CHANNELS, days: int = 1) -> pd.DataFrame:
+    """Every input's day features side by side, one row per patient-day, windowed.
 
-    Built independently of the labels so the window below can reach days the target
-    cannot score. Artifacts are outer-merged: a day one method dropped is a NaN row for
-    that method, never a missing day.
+    Built independently of the labels so the window can reach days the target cannot
+    score. Artifacts are outer-merged: a day one method dropped is a NaN row for that
+    method, never a missing day.
+
+    An embedding is NOT lagged: `encode` already embedded the whole `days` window ending
+    on the day, so lagging it would hand the model `days` overlapping copies of it.
     """
-    parts = []
+    parts, embedded = [], []
     for a in artifacts:
         tbl = a.read_table(a.manifest["tables"][0])
         tbl["p_id"] = tbl["p_id"].astype(str)
@@ -200,16 +203,17 @@ def _features(artifacts, profile: int = 0,
             # `createdTime` these rows do not have, so it would raise, not degrade.
             tbl["date"] = pd.to_datetime(tbl["date"]).dt.normalize()
             cols = [c for c in tbl.columns if c not in _ID]
-            parts.append(tbl[[*_ID, *cols]].rename(
+            embedded.append(tbl[[*_ID, *cols]].rename(
                 columns={c: f"{prefix}_{c}" for c in cols}))
             continue
         parts.append(_day_features(tbl, prefix=prefix, profile=profile))
     # EVERY MODEL GETS EVERY VARIABLE. A path decides what happens to the channel it
     # processes; every other channel still goes in, raw. So the raw blocks are always
     # added — minus the channels an artifact already covers, which would otherwise
-    # appear twice under two prefixes.
+    # appear twice under two prefixes. An embedding covers nothing: it replaces no
+    # day feature, so the raw block of its channel still goes in beside it.
     covered = {a.manifest.get("stats", {}).get("signal", DEFAULT_CHANNEL)
-               for a in artifacts}
+               for a in artifacts if a.manifest.get("grain") != "day"}
     from wearable.steps.detect import _load_input   # the one allowed cross-step import
     for ch in channels:
         if ch in covered:
@@ -229,6 +233,9 @@ def _features(artifacts, profile: int = 0,
             f"nothing to join: no artifacts and no ingested files for {list(channels)}")
     feat = parts[0]
     for part in parts[1:]:
+        feat = feat.merge(part, on=_ID, how="outer")
+    feat = lag_window(feat, days)
+    for part in embedded:
         feat = feat.merge(part, on=_ID, how="outer")
     return feat
 
@@ -418,7 +425,7 @@ def run(artifacts=(), target: str = "detection", seed: int = SEED,
     if valid != "hrv":
         params = {**params, "valid": valid}
     inputs = [a.ref for a in artifacts]
-    code_hash = "join3"            # this step's own logic version
+    code_hash = "join4"            # this step's own logic version
 
     if not force:
         hit = store.find(STEP, name, params, inputs, code_hash)
@@ -448,7 +455,7 @@ def run(artifacts=(), target: str = "detection", seed: int = SEED,
 
     # Features first, then the window, then the labels: the lag columns of a scored day
     # may come from days the target cannot score.
-    frame = y.merge(lag_window(_features(artifacts, profile, channels), days),
+    frame = y.merge(_features(artifacts, profile, channels, days),
                     on=_ID, how="left")
     frame = frame.merge(split, on="p_id", how="left")
     frame = frame[frame["split"].notna()]

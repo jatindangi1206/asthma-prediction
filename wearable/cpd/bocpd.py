@@ -12,10 +12,14 @@ Trigger: changepoint posterior P(run-length → 0) > 0.95  →  BOCPD_Mean_Shift
 
 import numpy as np
 
-HAZARD_LAMBDA = 1000          # 1/1000 hazard: ~1 event per 1000 ten-minute points
 MU0 = 0.0                     # residual baseline is exactly zero
-MIN_RUN = 6                   # the MAP run length must have grown >=1h before a collapse counts
-DROP_FRAC = 0.5             # collapse = MAP run length falls below this fraction of its prior value
+# The knobs, tuned on HRV at its 10-min cadence. Counts are in SAMPLES, not minutes, so
+# a faster channel needs its own values — `config.CPD_SETTINGS` overrides these per channel.
+DEFAULTS = {
+    "hazard_lambda": 1000,    # 1/1000 hazard: ~1 event per 1000 ten-minute points
+    "min_run": 6,             # the MAP run length must have grown >=1h before a collapse counts
+    "drop_frac": 0.5,         # collapse = MAP run length falls below this fraction of its prior value
+}
 PHENO_MEAN = "BOCPD_Mean_Shift"
 PHENO_VAR = "BOCPD_Variance_Change"
 
@@ -59,10 +63,11 @@ def _bocpd(values, hazard_lambda, mu0, sigma0, sigma_x):
     return cp, map_run
 
 
-def detect(time, values, priors=None):
+def detect(time, values, priors=None, **params):
     """Detect mean shifts in the residual via run-length collapse. Returns
        {anomaly (0/1), phenotype, magnitude (run-length drop fraction), severity}.
     """
+    p = {**DEFAULTS, **params}
     N = len(values)
     out = {"anomaly": np.zeros(N, int),
            "phenotype": np.full(N, "normal", dtype=object),
@@ -72,12 +77,12 @@ def detect(time, values, priors=None):
 
     priors = priors or {}
     sigma0 = float(priors.get("sigma0", np.std(values) or 1.0)) or 1.0
-    cp, map_run = _bocpd(values, HAZARD_LAMBDA, MU0, sigma0, sigma0)
+    cp, map_run = _bocpd(values, p["hazard_lambda"], MU0, sigma0, sigma0)
 
-    w = MIN_RUN
+    w = p["min_run"]
     for t in range(1, N):
         prev = map_run[t - 1]
-        if prev >= MIN_RUN and map_run[t] <= DROP_FRAC * prev:    # run-length collapse
+        if prev >= w and map_run[t] <= p["drop_frac"] * prev:    # run-length collapse
             # Classify the change CAUSALLY (only data up to t): compare an "old"
             # trailing window to the "recent" window ending at t. A larger mean
             # shift => BOCPD_Mean_Shift; a larger spread change => BOCPD_Variance_Change.
@@ -101,7 +106,6 @@ def detect(time, values, priors=None):
 
 # --- registry metadata (auto-discovered; see wearable/registry.py) ---
 LABEL = "Bayesian online CPD (Adams & MacKay 2007)"
-DEFAULTS = {}
 PHENOTYPES = (
     'BOCPD_Mean_Shift',
     'BOCPD_Variance_Change',

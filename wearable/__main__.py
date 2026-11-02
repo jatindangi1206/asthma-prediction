@@ -119,8 +119,12 @@ def _list() -> None:
     print("\ninputs         python -m wearable sweep inputs --variants <key>,<key>")
     for k, spec in experiment.INPUTS.items():
         on = spec["detect_on"]
-        print(f"  {k:<14} {'a smoother' if spec['smooth'] else 'no smoothing'}"
-              f"{f', CPD on the {on} signal' if on else ', no CPD'}")
+        fm = spec["forecast"] or spec["encode"]
+        print(f"  {k:<22} {'a smoother' if spec['smooth'] else 'no smoothing'}"
+              f"{f', CPD on the {on} signal' if on else ', no CPD'}"
+              f"{f', frozen {fm}' if fm else ''}")
+    print(f"  {'':<22} each runs on every channel in --signals "
+          f"(default {','.join(config.PATH_SIGNALS)})")
     print(f"\ntasks          {' · '.join(sorted(join_step.TARGETS))}"
           "   (--task; label and validity columns per task)")
     print(f"\nwindow         python -m wearable sweep window --days <n>,<n> "
@@ -130,6 +134,13 @@ def _list() -> None:
     print(f"  --horizon    onset only, 1..{config.HORIZON}  an episode starts within "
           f"this many days (ablation {list(config.WINDOW_HORIZON)})")
     print(f"\nensemble       {list(cpd.DEFAULT_ENSEMBLE)}")
+    from wearable.steps.detect import cpd_settings
+    print("cpd settings   per channel, config.CPD_SETTINGS (counts are in samples)")
+    for ch in config.CPD_SETTINGS:
+        step, per = cpd_settings(ch, cpd.DEFAULT_ENSEMBLE)
+        for i, (name, knobs) in enumerate([("detect", step), *per.items()]):
+            print(f"  {ch if i == 0 else '':<5}{name:<8} "
+                  + "  ".join(f"{k}={v}" for k, v in knobs.items()))
     print(f"store format   {store.store_format()}  (set WEARABLE_FORMAT to change)")
     print("legacy         pf (SMC+FFBS) is non-causal — legacy/run_pf_filters.py\n")
 
