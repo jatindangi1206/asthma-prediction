@@ -2,14 +2,20 @@
 
 Contract — a module here is a metric if it exposes `compute` and declares `KIND`:
 
-    KIND = "model"    compute(y_true, y_prob) -> float    judges a prediction
-    KIND = "signal"   compute(raw, smoothed)  -> float    judges a method, no model
+    KIND = "model"    compute(y_true, y_prob)  -> float   judges a prediction
+    KIND = "signal"   compute(raw, smoothed)   -> float   judges a method, no model
+    KIND = "event"    compute(predictions)     -> float   judges whole episodes
 
-The two kinds exist because a smoothing method can be judged either way: put it through
-a model and compare prediction probabilities, or compare raw against smoothed directly.
+`model` and `signal` exist because a smoothing method can be judged either way: put it
+through a model and compare prediction probabilities, or compare raw against smoothed
+directly. `event` exists because an episode is caught when ANY of its days is flagged,
+which the two arrays cannot express — so those metrics are handed the whole predictions
+frame (`p_id, date, y, y_prob, event`, plus `group` when it is known).
+
 `HIGHER_IS_BETTER` (default True) tells the comparison table which way to rank.
 
 The metrics are deliberately not fixed — add a file and it appears in every comparison.
+A metric whose name starts with `_` is a helper, not a metric (see `_confusion.py`).
 """
 from wearable.registry import available, get, registry
 

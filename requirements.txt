@@ -11,3 +11,9 @@ hmmlearn==0.3.3
 jupyter==1.1.1
 ipykernel==6.29.5
 plotly==6.8.0
+
+# Models of the modelling experiment (wearable/models/). selftest fails on a method it
+# cannot import, so these are not optional once the model files are present.
+xgboost==2.1.4
+catboost==1.2.7
+torch==2.5.1

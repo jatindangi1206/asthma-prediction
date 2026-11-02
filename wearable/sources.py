@@ -1,4 +1,4 @@
-"""Data sources: bring HRV in from whatever the export looks like.
+"""Data sources: bring the physiological signals in from whatever the export looks like.
 
 Each source hides one export format behind two functions, so the ingest stage — and
 therefore everything downstream — is identical whatever the input was:
@@ -6,9 +6,11 @@ therefore everything downstream — is identical whatever the input was:
     patients()   -> [pid, ...]          which patients this source offers
     load(pid)    -> PatientData         that patient's readings, and labels if it has any
 
-`PatientData.hrv` must carry just `createdTime` and `hrvValue`, unsorted and ungapped;
-ingest applies the shared H8 gap rule. `PatientData.labels` is optional day-level ground
-truth and is `None` for sources that have none.
+`PatientData.readings` carries `createdTime` plus one column per channel the export
+actually holds, named as `config.CHANNELS` says — unsorted and ungapped, since ingest
+applies the shared H8 gap rule per channel. A source that only has HRV returns only
+`hrvValue`, and nothing downstream cares. `PatientData.labels` is optional day-level
+ground truth and is `None` for sources that have none.
 
 Adding a format (a new device, a new study export) is one `patients`/`load` pair plus one
 `Source(...)` line at the bottom. Nothing else in the pipeline changes.
@@ -21,7 +23,7 @@ from typing import Callable
 
 import pandas as pd
 
-from wearable.config import RAW_DIR
+from wearable.config import CHANNELS, RAW_DIR
 
 PASS1_DIR = RAW_DIR / "pass1"
 SPARK_DIR = RAW_DIR / "spark"
@@ -36,9 +38,15 @@ _STR_COLS = {"episode": str, "onset_id": str, "p_id": str}
 @dataclass
 class PatientData:
     pid: str
-    hrv: pd.DataFrame                 # createdTime, hrvValue
+    readings: pd.DataFrame            # createdTime + one column per available channel
     labels: pd.DataFrame | None = None  # p_id, date, <LABEL_COLS>
-    note: str = ""                    # why hrv is empty, when it is
+    note: str = ""                    # why readings is empty, when it is
+
+    def channels(self) -> list[str]:
+        """The channels this patient actually has at least one reading of."""
+        return [c for c, col in CHANNELS.items()
+                if col in self.readings.columns
+                and pd.to_numeric(self.readings[col], errors="coerce").notna().any()]
 
 
 # ---------------------------------------------------------------------------
@@ -57,8 +65,8 @@ def pass1_patients() -> list[str]:
 
 
 def pass1_load(pid: str) -> PatientData:
-    rel = _pass1_index().set_index("p_id").at[pid, "file"]
-    df = pd.read_csv(PASS1_DIR / rel, parse_dates=["time"], dtype=_STR_COLS)
+    row = _pass1_index().set_index("p_id").loc[pid]
+    df = pd.read_csv(PASS1_DIR / row["file"], parse_dates=["time"], dtype=_STR_COLS)
     if df.empty:
         return PatientData(pid, pd.DataFrame(columns=["createdTime", "hrvValue"]),
                            note="empty file")
@@ -68,11 +76,36 @@ def pass1_load(pid: str) -> PatientData:
     labels = (df.assign(date=df["time"].dt.normalize())
                 .groupby("date", as_index=False)[LABEL_COLS].first())
     labels.insert(0, "p_id", pid)
+    # Which channels each day actually holds a reading of. The study's own `sample`
+    # column means "the day has at least one HRV reading" (raw README §3), which bakes
+    # an HRV-only pipeline into the ground truth — a day with 710 heart-rate readings
+    # and no HRV is marked unscoreable. Storing the FACTS here lets `join` choose the
+    # rule (`join.VALIDITY`) without re-ingesting, and lets the wider rule be measured
+    # against the study's own before anything is changed.
+    day = df.assign(date=df["time"].dt.normalize()).groupby("date")
+    for ch, col in CHANNELS.items():
+        raw_name = {"hrv": "hrv"}.get(ch, ch)
+        labels[f"has_{ch}"] = (
+            day[raw_name].apply(lambda v: int(v.notna().any())).reindex(
+                labels["date"]).fillna(0).astype(int).to_numpy()
+            if raw_name in df.columns else 0)
+    # The cohort group (aiims_adult / aiims_paed / copd) lives in the patient index, not
+    # in the minute file. Scores are reported per group and the split is stratified by
+    # it, so it travels with the labels.
+    labels["group"] = row["group"]
 
-    hrv = (df.loc[df["hrv"].notna(), ["time", "hrv"]]
-             .rename(columns={"time": "createdTime", "hrv": "hrvValue"}))
-    note = "" if len(hrv) else "no HRV readings"
-    return PatientData(pid, hrv, labels, note)
+    # Every channel the export holds, on the raw timestamps. Rows are NOT filtered on
+    # any one channel: ingest builds each channel's own grid from its own observations,
+    # so keeping a row that has heart rate but no HRV is what lets the 30 patients with
+    # no surviving HRV into the pipeline at all.
+    have = {col: raw for ch, col in CHANNELS.items()
+            if (raw := {"hrv": "hrv"}.get(ch, ch)) in df.columns}
+    readings = df[["time", *have.values()]].rename(
+        columns={"time": "createdTime", **{raw: col for col, raw in have.items()}})
+    present = [c for c, col in CHANNELS.items()
+               if col in readings.columns and readings[col].notna().any()]
+    note = "" if present else "no readings in any channel"
+    return PatientData(pid, readings, labels, note)
 
 
 # ---------------------------------------------------------------------------

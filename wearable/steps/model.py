@@ -1,7 +1,11 @@
 """Step: model. Trains on a join artifact's train table, predicts on its test table.
 
     input   a join artifact
-    output  table `predictions`: p_id, date, y, y_prob
+    output  table `predictions`: p_id, date, y, y_prob, event, group
+
+The identifier columns travel with the probabilities because the scoring needs them: an
+event metric groups flagged days by `event`, and a per-group slice needs `group`.
+`config.META_COLS` names every such column, and none of them is ever a feature.
 
 Takes whatever dataset it is given, so smoothing and CPD can both be skipped entirely —
 `join.run(artifacts=[])` is a raw-feature baseline and this step treats it like any
@@ -15,7 +19,7 @@ import numpy as np
 import pandas as pd
 
 from wearable import models, registry, store
-from wearable.config import SEED
+from wearable.config import META_COLS, SEED
 
 STEP = "model"
 
@@ -42,7 +46,7 @@ def run(join_artifact, model: str = models.DEFAULT_MODEL, seed: int = SEED,
     train = join_artifact.read_table("train")
     test = join_artifact.read_table("test")
     if not feature_cols:
-        feature_cols = [c for c in train.columns if c not in {"p_id", "date", "y"}]
+        feature_cols = [c for c in train.columns if c not in META_COLS]
 
     Xtr, ytr = _xy(train, feature_cols)
     Xte, yte = _xy(test, feature_cols)
@@ -56,7 +60,8 @@ def run(join_artifact, model: str = models.DEFAULT_MODEL, seed: int = SEED,
     fitted = mod.fit(Xtr, ytr, seed=seed, **overrides)
     prob = np.asarray(mod.predict_proba(fitted, Xte), dtype=float)
 
-    preds = test[["p_id", "date"]].copy()
+    carry = [c for c in META_COLS if c != "y" and c in test.columns]
+    preds = test[carry].copy()
     preds["y"] = yte
     preds["y_prob"] = prob
     art.write_table("predictions", preds)

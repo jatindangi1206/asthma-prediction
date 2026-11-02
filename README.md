@@ -285,7 +285,7 @@ The smoother processes each chunk independently, initializes fresh state at boun
 | Key | Method | Selected default parameters | Truncation-exact in current test |
 |:--|:--|:--|:--:|
 | `anrewma` | Adaptive-norm robust EWMA | `norm_alpha=0.05`, `ewma_c=1.0` | **Yes** |
-| `ctimm` | Continuous-time interacting multiple model | `q_scale=0.001`, `stickiness=0.95` | **Yes** |
+| `ctimm` | Continuous-time interacting multiple model | `q_scale=0.001`, `stickiness=0.95` | No — *was listed Yes until 30 Oct 2026; see [Causality audit](#causality-audit)* |
 | `gammadglm` | Gamma conjugate-discount DGLM **(pipeline default)** | `deltrend=0.99`, `delseas=0.99`, `shape_scale=1.0` | No |
 | `gpssm` | State-space Gaussian process | `q_scale=0.05`, `r_scale=5.0` | No |
 | `hrkf` | Huber robust Kalman filter | `deltrend=0.99`, `delseas=0.99`, `huber_delta=1.345` | No |
@@ -351,19 +351,60 @@ predict_proba(fitted, X) -> array_of_probabilities
 
 | Key | Current implementation | Why it is used |
 |:--|:--|:--|
+| `always_no` | Never flags a day | The reference every other model must beat; fixes the meaning of accuracy at a 1 % base rate |
 | `logreg` | Logistic regression; median imputation; standardization; `class_weight="balanced"` | Fast, transparent model for isolating the effect of preprocessing and CPD features |
+| `histgb` | Histogram gradient boosting, `class_weight="balanced"` | Learns **which side a missing value goes to** at each split, so a day with no reading is not imputed away; the missingness pattern is itself informative |
+| `xgboost` | XGBoost; the reference design's settings (400 trees, depth 4, lr 0.05, rows and columns subsampled to 0.8), `scale_pos_weight` | The reference design's headline tree model, carried over unchanged so a row here is comparable with the one it was ported from |
+| `catboost` | CatBoost; 400 iterations, depth 4, lr 0.05, `auto_class_weights="Balanced"` | Oblivious trees grown with ordered boosting — less prone to overfitting a small positive class, which is the interesting difference at 144 exacerbation days |
+| `rnn` | Forward RNN over the day window, read at the classified day (hidden 64, 2 layers) | Whether plain recurrence over a week beats treating the week as flat columns |
+| `lstm` | The same encoder with LSTM cells | Whether gates that can hold state across the whole window buy anything over plain recurrence — the H2/H4 drifting-baseline story told by a model rather than by a smoother |
+| `presence_only` | `histgb` on coverage columns only (`_n_rows`, `gap_flag`) — never an HRV value | **The control.** If it scores like the real models, they are reading compliance, not physiology: a patient who feels ill wears the watch differently, which is a label leak dressed as a biomarker. The reference design's `gast_maskonly` scored onset AUROC 0.528 against full GAST's 0.506 |
+| `timestral` | Mistral Timestral-209M, **frozen**, forecasting the classified day from the days before it; a logistic head trained on the surprise | Whether a model trained on a billion time series knows what a normal day looks like better than anything fitted here. Needs `--profile 144 --days 7` |
+| `timesfm` | Google TimesFM, same arrangement (the reference design's 6.8) | The comparison against Timestral; default checkpoint is 2.5 (Apache-2.0), since 3.0 is non-commercial |
 
-Because exacerbation days are approximately **1%** of labeled sample days, the baseline explicitly addresses class imbalance. This is a research baseline, not a claim that logistic regression is the best architecture.
+Because exacerbation days are approximately **1%** of labeled sample days, every model explicitly addresses class imbalance. These are research baselines, not a claim that any of them is the best architecture.
+
+`rnn` and `lstm` read the window as a **sequence**, recovering it from the `_d<k>` column names alone (`wearable/models/_seq.py`, shared by both — a leading underscore keeps a helper out of the registry). They therefore need no new contract between the steps and run on any window, including `days=1`, which is simply one time step. Their input is the scaled values *plus a "day present" flag per feature*: a day with no recording is a real observation about a patient, so it is told to the network rather than imputed.
+
+Two deliberate departures from the reference design, both forced by the model contract:
+
+- **No early stopping in `rnn`/`lstm`.** The reference held back *patients* to early-stop on. A model here is handed features and a label and never sees `p_id`, so a holdout would put the same patient on both sides and early-stop on leaked information. The step count is fixed instead; the rest of the loop is the reference's (half-exacerbation batches, Adam, BCE on the logit, gradients clipped at 1.0).
+- **GAST and TimesFM are not ported.** GAST is one token per *minute* that has a reading, with state decaying by the real elapsed time between tokens; at day resolution its gap-aware machinery degenerates to the day-present mask `_seq.py` already carries, so porting it would be `lstm` under another name. TimesFM needs its downloaded checkpoint and carries a non-commercial licence — one file each once that is in place.
+
+> **These three models add dependencies.** `xgboost`, `catboost` and `torch` are in `requirements.txt`, and `python -m wearable selftest` **fails on any method it cannot import** — so install before running: `.venv/bin/pip install -r requirements.txt`.
+
+**The two foundation models** read the day itself rather than summary statistics, so they need a profiled table — `join --profile 144 --days 7` gives them a 1,008-point series per row at the native 10-minute cadence. The frozen forecast is cached on disk by each row's context, so extra seeds are free. They are **imported lazily and deliberately not in `requirements.txt`**: an unimportable method fails `selftest`, and licence-gated multi-gigabyte weights have no business in an architecture check. Install when you want them:
+
+```bash
+pip install git+https://github.com/mistralai/timestral.git   # Modified MIT
+pip install "timesfm[torch]"                                 # 2.5 is Apache-2.0
+```
+
+```bash
+python -m wearable sweep models --variant raw --days 7 --profile 144 \
+    --model_names timestral,logreg,histgb,presence_only,always_no \
+    --test_pct 20 --seeds 0,1,2,3,4
+```
+
+Only the forecast median is used, so the surprise is a plain signed error; the 21 quantiles would give a calibrated tail probability instead, which is one more function in `_foundation.surprise` and is not built. The head sees surprise **only**, so its row answers "what does frozen-foundation-model surprise achieve on its own" — pass `--model_params "{'with_day_features': True}"` to ask instead whether surprise *adds* to the day features.
+
+Sizing note, not a bug: a 7-day window is 7 time steps and the cohort has 144 exacerbation days in total. The reference ran its networks on 10,080 × 7 values per sample, where a recurrent encoder has something to compress. Here they are a fair row in the comparison, not the favourite — read them next to `histgb` and `xgboost`.
 
 ### 4. Evaluation metrics
 
-Metrics are plug-ins with `KIND = "model"` or `KIND = "signal"` and `HIGHER_IS_BETTER`.
+Metrics are plug-ins with `KIND = "model"`, `"signal"` or `"event"` and `HIGHER_IS_BETTER`.
 
 | Metric | Kind | Interpretation | Desired direction |
 |:--|:--|:--|:--|
 | `auroc` | Model | Ranking of positive vs negative days across thresholds | ↑ |
 | `auprc` | Model | Precision-recall performance; especially relevant at low prevalence | ↑ |
 | `brier` | Model | Mean squared error of predicted probabilities; reflects probability accuracy | ↓ |
+| `accuracy`, `balanced_accuracy` | Model | Days called correctly, unweighted and class-weighted, at `config.THRESHOLD` | ↑ |
+| `sensitivity`, `specificity` | Model | Exacerbation days flagged; normal days left alone | ↑ |
+| `ppv`, `npv`, `f1` | Model | Precision, negative predictive value and their balance at the threshold | ↑ |
+| `false_alarms_per_30_days` | Model | Alarm burden in the unit a clinician plans around | ↓ |
+| `event_sensitivity` | Event | Share of whole episodes caught — any flagged day catches the episode | ↑ |
+| `lead_days` | Event | Median days from an episode's first flag to its onset; ≤ 0 on detection | ↑ |
 | `variance_reduction` | Signal | Fraction of raw HRV variance removed | ↑, **with caution** |
 | `roughness_reduction` | Signal | Decrease in average absolute first differences | ↑ |
 | `peak_preservation` | Signal | Median fraction of local raw-peak excursion retained | ↑ |
@@ -412,6 +453,73 @@ python -m wearable sweep smoothers-no-model # model-free signal diagnostics
 
 Sweeps fix the target, the model, its seed, and patient split assignments. If a preprocessing method excludes patients, the *assignment* remains the same, but the evaluated set can become smaller. Use a **common eligible patient set** for a strict equal-sample comparison.
 
+### The modelling experiment
+
+The two prediction tasks are run over a grid of **input variants**, **models** and **folds**. An input variant is simply the set of artifacts handed to `join`, so the question "does smoothing earn its place? does CPD?" is answered by varying one axis and holding everything else fixed.
+
+| Input variant | Smoothing | CPD | What the model sees |
+|:--|:--|:--|:--|
+| `raw` | — | — | Day features of the ingested signal |
+| `smoothed` | yes | — | Raw, smoothed and residual day features |
+| `raw+cpd` | — | on `raw` | Raw day features plus change-point features |
+| `smoothed+cpd` | yes | on `smoothed` | Smoothing features plus change-point features |
+| `residual+cpd` | yes | on `residual` | Smoothing features plus CPD on the de-trended track |
+
+The signal columns come along for free: a smooth artifact's table carries `hrvValue`, `smoothed_hrv` and `residual_hrv`, and a detect artifact's table carries the signal it ran on beside its anomaly flags. Any other legal pair is available through `experiment.inputs(smooth_method=..., detect_on=...)`; a new named variant is one entry in `experiment.INPUTS`.
+
+```bash
+# Detection across every input variant, the default fold grid, one model.
+python -m wearable sweep inputs --task detection
+
+# Onset prediction, two variants, two models, one fold — a fast check.
+python -m wearable sweep inputs --task onset --variants raw,residual+cpd \
+    --model_names logreg,histgb --test_pct 20 --seeds 0
+
+# The model as the axis instead, on one fixed input.
+python -m wearable sweep models --task detection --variant residual+cpd
+
+# Skip the bootstrap intervals while iterating (a few seconds per cell).
+python -m wearable sweep inputs --variants raw --test_pct 20 --seeds 0 --boot 0
+```
+
+**Folds.** Each cell runs at every train:test ratio in `config.TEST_PCT` (20, 10, 30, 40, 50 % test) and every seed in `config.SEEDS` (0–4): 25 folds by default. The seed drives both the split and the model, so a cell is identified by `(input, task, model, days, horizon, test_pct, seed)` and nothing else.
+
+**What is held fixed**, and asserted at run time: within a fold, every input variant and every model is scored on the *same* test days, the same positives, the same episodes and the same patients. The sweep raises `AssertionError` if that ever fails. It holds because the split is a function of `(universe, seed, share, strata)` alone and the universe comes from the labels — a variant that produces no features for a patient leaves `NaN` features, not missing rows.
+
+**Output.** `data/reports/experiments/runs_<task>.csv` (one row per cell and cohort group) and `summary_<task>.csv` (mean and SD over seeds, plus the mean interval). Detection and onset never share a table. The runs file is read, merged and rewritten rather than appended to — a run with a different column set (`--boot 0` drops every `_lo`/`_hi`) would corrupt it under an older header — and a re-run of the same cell replaces the earlier one.
+
+### The window ablation: how much history, and how far ahead
+
+The same inputs, models, folds, split and scores; the only thing that changes is how much history the model is given. Detection asks 7 days of input, then 6, 5, … down to the classified day alone, and the question never moves: **is this day an exacerbation day?** Onset takes the same 7 … 1 days of input and asks a different question: **does a new episode start within `--horizon` days?** — 1 being the strictest, tomorrow only.
+
+```bash
+# Detection: 7 days of input down to 1, on the raw signal, every model.
+python -m wearable sweep window --task detection
+
+# Onset: the same windows, asking only about the next day.
+python -m wearable sweep window --task onset --horizon 1
+
+# Part of the grid, two models, one fold.
+python -m wearable sweep window --days 7,3,1 --model_names histgb,xgboost \
+    --test_pct 20 --seeds 0
+
+# One dataset by hand: a 7-day window, onset tomorrow.
+python -m wearable join --days 7 --target onset --horizon 1
+```
+
+Both knobs belong to **`join`**, never to a model:
+
+| Knob | What it does | Default |
+|:--|:--|:--|
+| `--days N` | The classified day plus the `N-1` days before it, as `<feature>_d0 … _d<N-1>` lag columns. `_d0` is the classified day, `_d1` yesterday. `N=1` returns the pre-window dataset untouched, column names and all. | `config.DAYS` = 1 |
+| `--horizon H` | Onset only. The labels hold "a new episode within 1–3 days"; `H` keeps the positives whose episode starts within `H` days and clears the label *and* the episode id of the rest. | `config.HORIZON` = 3 |
+
+Three properties worth knowing:
+
+- **A missing day stays missing.** Lags are built by merging a forward-dated copy of the feature frame on `(p_id, date)`, not by `shift(k)` on row order — so a day absent from the recording gives `NaN` rather than silently pulling the next-oldest day into its place. `NaN` is informative here, and the tree models learn which side it goes to.
+- **Lags reach days the target cannot score.** Features are assembled and windowed *before* the labels are merged, so the history of a scored day is complete even where the day before it is not itself a `sample` day.
+- **Narrowing the horizon never moves the day set.** Only the label narrows, so two horizons share a denominator and are directly comparable. The fairness assertion keys on the horizon (a stricter question legitimately has fewer positives) but **not** on the window — so it doubles as proof that going from 1 to 7 days of input did not change what was being scored.
+
 ### Reports
 
 ```bash
@@ -445,14 +553,34 @@ flowchart LR
 
 This avoids splitting different days from the same patient across train and test. Adding patients does not reshuffle existing patient assignments. The patient universe remains defined by the labels, not by whichever method happened to emit features.
 
+**Stratification.** The modelling experiment draws the test share *within* each stratum — cohort group × whether the patient has any exacerbation day — ranking a stratum's members by the same hash. With roughly 1 % positive days, and only 8 exacerbation days in the whole paediatric group, an unstratified draw can leave a fold with no positive test patient and no computable AUROC. Stratifying costs a little of the growth stability above: a patient at a stratum's rounding boundary can move when that stratum gains members. The split remains a pure function of `(universe, seed, share, strata)`, which is what a fair comparison needs. Pass `stratify=False` for the plain hash split.
+
+The strata and the universe are taken from the **detection** labels whatever the task is, so detection and onset are scored on the same test patients and can be read side by side.
+
 ### Tasks and outcomes
 
 | Task | Unit of prediction | Positive class |
 |:--|:--|:--|
 | **Detection** | Eligible patient-day | The day is labeled an exacerbation day |
-| **Onset** | Onset-eligible patient-day | A new exacerbation episode starts in the next **1–3 days** |
+| **Onset** | Onset-eligible patient-day | A new exacerbation episode starts in the next **1–3 days** — narrowed by `--horizon` (1 = tomorrow only) without changing the day set |
 
 The model produces `y_prob = P(y = 1)` for each evaluated patient-day. AUROC tests the **ranking** of positive versus negative days; AUPRC evaluates precision-recall across score thresholds; the Brier score tests probability accuracy. At a roughly 1% detection prevalence, AUPRC must be read against that low base rate.
+
+### Scoring a prediction
+
+A prediction is scored three ways, because no single number answers the clinical question:
+
+| Scope | Metrics | Reads |
+|:--|:--|:--|
+| **Per day** | `accuracy`, `balanced_accuracy`, `sensitivity`, `specificity`, `ppv`, `npv`, `f1`, `false_alarms_per_30_days` at `config.THRESHOLD`; `auroc`, `auprc`, `brier` threshold-free | How individual days are called |
+| **Per episode** (`KIND = "event"`) | `event_sensitivity`, `lead_days` | An episode is **caught if any of its days is flagged** — what a clinician means by catching an exacerbation |
+| **Per band** | the `calibration` table | Does a day given probability 0.3 actually happen 30 % of the time? Ranking says nothing about this |
+
+Episode-level metrics receive the whole predictions frame rather than `(y_true, y_prob)`, because an episode id cannot be recovered from the two arrays. `model` carries `event` and `group` through to `predictions` for exactly this reason, and `config.META_COLS` keeps those columns out of every feature matrix.
+
+**Intervals.** `lo` and `hi` in the `metrics` table are a 95 % interval from resampling **test patients** with replacement (`config.BOOT`, 1000 draws), not days: days within a patient are dependent, so resampling days reports an interval several times too narrow. A patient drawn twice contributes two distinct episodes, so an episode cannot be counted as caught twice. Only `config.BOOT_METRICS` get an interval; the rest are point estimates. 1000 draws cost roughly 2-3 seconds per cell, so pass `--boot 0` while iterating on a large grid.
+
+**Reference row.** The `always_no` model never flags a day. At a ~1 % base rate it scores ~99 % accuracy and a specificity of 1.0 while catching nothing, and its AUPRC is the base rate itself. Any comparison reporting accuracy without that row is unreadable.
 
 ---
 
@@ -487,7 +615,7 @@ This is a warning, **not a win for `gpssm`**: it retains approximately 1% of pea
 
 </details>
 
-**Interpretation:** `anrewma` and `ctimm`, the two truncation-exact smoothers in the current test, lead this particular archived model comparison. Even the leading AUPRC is low in absolute terms. These results support **further research**, not clinical deployment or a general claim of superiority.
+**Interpretation:** `anrewma` and `ctimm` lead this particular archived model comparison. Both were believed truncation-exact when it was run; only `anrewma` is (see [Causality audit](#causality-audit)). Even the leading AUPRC is low in absolute terms. These results support **further research**, not clinical deployment or a general claim of superiority.
 
 Reproduce with `python -m wearable sweep smoothing` and `python -m wearable sweep smoothers-no-model`, subject to the same input cohort and environment. The archived run is under `data/old/`; the supplied repository state reports only `data/raw/pass1/` as current input.
 
@@ -571,9 +699,9 @@ The artifact store provides standardized tables for each stage.
 |:--|:--|:--|
 | `smooth` | `smoothed` | `p_id`, `createdTime`, `hrvValue`, `minute_diff`, `smoothed_hrv`, `residual_hrv`, `gap_flag`, `chunk_id` |
 | `detect` | `detected` | `p_id`, `createdTime`, signal, `chunk_id`, `armed`, per-detector outputs, `anomaly_present`, `primary_phenotype`, `magnitude`, `sigma0` |
-| `join` | `train`, `test`, `split` | `p_id`, `date`, engineered features, `y`; split assignments |
-| `model` | `predictions` | `p_id`, `date`, `y`, `y_prob` |
-| `evaluate` | `metrics` | `metric`, `kind`, `label`, `value`, `higher_is_better` |
+| `join` | `train`, `test`, `split` | `p_id`, `date`, engineered features (suffixed `_d0 … _d<N-1>` when `--days N > 1`), `y`, `event`, `group`; split assignments |
+| `model` | `predictions` | `p_id`, `date`, `y`, `y_prob`, `event`, `group` |
+| `evaluate` | `metrics`, `calibration`, `metrics_by_group` | `metric`, `kind`, `label`, `value`, `lo`, `hi`, `higher_is_better`; band-level predicted vs observed; the same metrics per cohort group |
 
 **Important field semantics**
 
@@ -719,20 +847,25 @@ Expected:       y1  y2  y3 must match in both runs
 
 ### Observed prefix discrepancies
 
+Measured at the current probe length: 200 readings, 140 overlapping.
+
 | Method | Maximum absolute prefix-vs-full difference |
 |:--|--:|
 | **`anrewma`** | **0.000** |
-| **`ctimm`** | **0.000** |
-| `hrkf` | 0.002 |
-| `gammadglm` | 0.052 |
-| `ossa` | 0.111 |
-| `kim` | 0.122 |
-| `krlst` | 0.135 |
-| `gpssm` | 0.172 |
-| `rspf` | 0.388 |
-| `logmhw` | 0.479 |
+| `ctimm` | 0.097 |
+| `kim` | 0.115 |
+| `gammadglm` | 0.127 |
+| `krlst` | 0.270 |
+| `gpssm` | 0.326 |
+| `hrkf` | 0.357 |
+| `ossa` | 0.739 |
+| `logmhw` | 1.728 |
+| `rspf` | 3.156 |
 
-**Root cause:** eight methods filter forward but calculate per-patient parameters (MAD noise, observed range, log-mean, or median time interval) from the **entire supplied frame**. The value emitted at time `t` can therefore change when observations after `t` arrive. This behavior predates the repository restructuring.
+> [!WARNING]
+> **These numbers replace an earlier, more flattering table, and `ctimm` moved out of the exact column on 30 Oct 2026.** The old probe used 60 readings with 40 overlapping — too short for the whole-frame statistics these methods fit to come out different between the prefix and the full run. `ctimm` passed it only for that reason: it fits the observed log range and a MAD noise variance `R` on the entire frame ([`ctimm.py:162-164`](wearable/smoothing/ctimm.py#L162-L164)). Its own module demo cannot catch this either, because it computes `R` once and passes the same value to both runs — testing that the filter is forward-only given fixed parameters, which is a weaker claim than truncation exactness. `hrkf` read 0.002 under the old probe and is really 0.357. If you quoted the old figures anywhere, they understate the leak.
+
+**Root cause:** nine of the ten methods filter forward but calculate per-patient parameters (MAD noise, observed range, log-mean, or median time interval) from the **entire supplied frame**. The value emitted at time `t` can therefore change when observations after `t` arrive. This behavior predates the repository restructuring; only the measurement of it changed.
 
 **What to do:** estimate patient-specific quantities causally using an expanding window or a frozen calibration period. The retired `legacy/calibrate_adaptive_baseline.py` already demonstrates expanding calibration for the noise floor. Retest the complete `smooth → detect → join → model` chain, including the HMM inference mode, after these changes.
 
@@ -751,7 +884,10 @@ For a new algorithm, create one Python module in the appropriate pool and implem
 | CPD detector | `wearable/cpd/<name>.py` | `detect(time, values, priors)` with four output arrays |
 | Model | `wearable/models/<name>.py` | `fit(X, y, seed, **params)` + `predict_proba(fitted, X)` |
 | Metric | `wearable/metrics/<name>.py` | `compute(...)`, `KIND`, `HIGHER_IS_BETTER` |
+| Input variant | one entry in `experiment.INPUTS` | `{"smooth": bool, "detect_on": None \| "raw" \| "smoothed" \| "residual"}` |
 | Data adapter | `wearable/sources.py` | `patients()` / `load(pid)` plus a `Source(...)` registration |
+
+A metric's `compute` signature follows its `KIND`: `(y_true, y_prob)` for `"model"`, `(raw, smoothed)` for `"signal"`, and the whole predictions frame for `"event"`. A module whose name starts with `_` is a helper, not a method, so shared code can live in a pool directory (see `metrics/_confusion.py` and `metrics/_events.py`).
 
 Optional descriptors: `LABEL`, `DEFAULTS`, and for smoothers `CONFIG`. These make the algorithm visible in `wearable list`, experimental sweeps, and manifests.
 
@@ -779,7 +915,7 @@ Optional descriptors: `LABEL`, `DEFAULTS`, and for smoothers `CONFIG`. These mak
 
 | Area | Current constraint | Planned direction |
 |:--|:--|:--|
-| **Online causality** | 8/10 smoothers use future-dependent per-patient estimates | Expanding/frozen calibration; repeat truncation audit |
+| **Online causality** | 9/10 smoothers use future-dependent per-patient estimates | Expanding/frozen calibration; repeat truncation audit at >=200 readings |
 | **Detector inference** | Full-sequence HMM Viterbi may be retrospective | Forward filtering for online HMM state probabilities |
 | **Calibration** | Adaptive stage 3a lives in legacy code and is not wired into active `detect` | Optional adaptive calibration stage |
 | **Offline smoother** | `pf` uses backward FFBS and is not online-capable | Retain only for retrospective comparison |

@@ -1,7 +1,8 @@
 """Step: change-point detection. Runs CPD methods on whichever signal you point it at.
 
-    input   `on="raw"`                 -> the ingest artifact (data/processed/)
-            `on="smoothed"|"residual"` -> a smooth artifact
+    input   `on="raw"`                  -> the ingest artifact (data/processed/)
+            `on="smoothed"|"residual"`  -> a smooth artifact
+            `on="surprise"|"tail"`      -> a forecast artifact
     output  one long table `detected`:
             p_id, createdTime, <signal>, chunk_id, armed,
             <method>_anomaly / _phenotype / _magnitude  for each method run,
@@ -23,12 +24,29 @@ import pandas as pd
 from tqdm import tqdm
 
 from wearable import cpd, registry, store
-from wearable.config import BURN_IN_N, GAP_THRESHOLD_MIN, POP_N0, POP_SIGMA0_DEFAULT, PROCESSED_DIR
+from wearable.config import (BURN_IN_N, CHANNELS, DEFAULT_CHANNEL, GAP_THRESHOLD_MIN,
+                             POP_N0, POP_SIGMA0_DEFAULT, PROCESSED_DIR,
+                             processed_files, processed_pid)
 
 warnings.filterwarnings("ignore")
 
 STEP = "detect"
-SIGNALS = {"raw": "hrvValue", "smoothed": "smoothed_hrv", "residual": "residual_hrv"}
+# Column templates, not fixed names: the same three choices apply to every channel.
+# `{val}` is the channel's own value column (`config.CHANNELS`), `{sig}` its key — so
+# for HRV these resolve to exactly the names this step has always used.
+SIGNALS = {"raw": "{val}", "smoothed": "smoothed_{sig}", "residual": "residual_{sig}",
+           # from a `forecast` artifact: the departure from a frozen model's
+           # expectation, and that departure as a calibrated tail probability
+           "surprise": "surprise_{sig}", "tail": "tail_{sig}"}
+
+
+def signal_column(on: str, signal: str = DEFAULT_CHANNEL) -> str:
+    """Which column `--on <on>` reads, for a given channel."""
+    if on not in SIGNALS:
+        raise ValueError(f"on must be one of {sorted(SIGNALS)}, got {on!r}")
+    if signal not in CHANNELS:
+        raise ValueError(f"signal must be one of {sorted(CHANNELS)}, got {signal!r}")
+    return SIGNALS[on].format(val=CHANNELS[signal], sig=signal)
 
 
 def _population_sigma0(frame: pd.DataFrame, col: str) -> float:
@@ -140,21 +158,32 @@ def _detect_patient(df: pd.DataFrame, col: str, methods, pop_sigma0: float):
     return out
 
 
-def _load_input(input_artifact, on: str) -> pd.DataFrame:
-    col = SIGNALS[on]
+def input_signal(input_artifact, signal: str | None = None) -> str:
+    """The channel to read: the argument, else whatever the input artifact recorded."""
+    if signal is not None:
+        return signal
+    if input_artifact is not None:
+        return input_artifact.manifest.get("stats", {}).get("signal", DEFAULT_CHANNEL)
+    return DEFAULT_CHANNEL
+
+
+def _load_input(input_artifact, on: str, signal: str = DEFAULT_CHANNEL) -> pd.DataFrame:
+    col = signal_column(on, signal)
     if on == "raw" and input_artifact is None:
         frames = []
-        for f in sorted(PROCESSED_DIR.glob("*_processed.csv")):
+        for f in processed_files(signal):
             d = pd.read_csv(f, encoding="utf-8-sig")
-            d["p_id"] = f.stem.replace("_processed", "")
+            d["p_id"] = processed_pid(f)
             frames.append(d)
         if not frames:
-            raise FileNotFoundError(f"no processed CSVs in {PROCESSED_DIR}")
+            raise FileNotFoundError(
+                f"no {signal} files in {PROCESSED_DIR} — run `ingest` first")
         frame = pd.concat(frames, ignore_index=True)
     else:
         if input_artifact is None:
-            raise ValueError(f"on={on!r} needs a smooth artifact as input")
-        frame = input_artifact.read_table("smoothed")
+            kind = "forecast" if on in ("surprise", "tail") else "smooth"
+            raise ValueError(f"on={on!r} needs a {kind} artifact as input")
+        frame = input_artifact.read_table(input_artifact.manifest["tables"][0])
     if col not in frame.columns:
         raise ValueError(f"input has no column {col!r} for on={on!r}; "
                          f"has {list(frame.columns)}")
@@ -163,12 +192,16 @@ def _load_input(input_artifact, on: str) -> pd.DataFrame:
 
 
 def run(methods=cpd.DEFAULT_ENSEMBLE, on: str = "residual", input_artifact=None,
-        force: bool = False, limit: int | None = None):
+        force: bool = False, limit: int | None = None, signal: str | None = None):
+    """`signal` picks the channel; omitted, it is taken from the input artifact's own
+    manifest, so a smooth artifact built with `--signal hr` is detected on heart rate
+    without having to say so twice."""
     if on not in SIGNALS:
         raise ValueError(f"on must be one of {sorted(SIGNALS)}, got {on!r}")
+    signal = input_signal(input_artifact, signal)
     methods = tuple(methods)
     specs = [registry.get("cpd", m) for m in methods]
-    col = SIGNALS[on]
+    col = signal_column(on, signal)
 
     # The artifact's "method" is the ensemble it ran, so variants sit side by side.
     name = "+".join(methods)

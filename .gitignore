@@ -33,3 +33,9 @@ venv/
 !/data/reports/smoothing/runs.csv
 !/data/reports/smoothing/settings.csv
 !/data/reports/smoothing/settings.json
+
+# Any sibling/scratch copy of the data tree, not just ./data — these are real
+# patient HRV records and the remote is public. Anchored /data/* missed data-2/
+# entirely and 4.6 GB of it reached a local commit before the size cap stopped it.
+data-*/
+/*.zip

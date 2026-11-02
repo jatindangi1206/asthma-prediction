@@ -11,7 +11,9 @@ There is no list to edit — see `wearable/registry.py`.
 """
 from wearable.registry import available, get, registry
 
-DEFAULT_MODEL = "logreg"
+# The cheapest of the real models, so a sweep that does not name one still runs
+# something comparable rather than the reference.
+DEFAULT_MODEL = "xgboost"
 
 
 def all_methods():

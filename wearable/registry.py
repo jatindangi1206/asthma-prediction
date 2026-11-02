@@ -3,12 +3,19 @@
 There is no list to maintain. Each pool is a package directory, and every module in it
 that exposes the pool's entry point becomes an available method:
 
-    pool          directory             entry point          extra module attributes
-    ----------    -------------------   ------------------   ------------------------
-    smoothing     wearable/smoothing/   smooth_dataframe     CONFIG, DEFAULTS, LABEL
-    cpd           wearable/cpd/         detect               DEFAULTS, LABEL
-    models        wearable/models/      fit + predict_proba  DEFAULTS, LABEL
-    metrics       wearable/metrics/     compute              KIND, LABEL
+    pool          directory              entry point          extra module attributes
+    ----------    --------------------   ------------------   ------------------------
+    smoothing     wearable/smoothing/    smooth_dataframe     CONFIG, DEFAULTS, LABEL
+    forecasting   wearable/forecasting/  forecast             DEFAULTS, LABEL, LEVELS
+    cpd           wearable/cpd/          detect               DEFAULTS, LABEL
+    encoders      wearable/encoders/     encode               DEFAULTS, LABEL, CONTEXT
+    models        wearable/models/       fit + predict_proba  DEFAULTS, LABEL
+    metrics       wearable/metrics/      compute              KIND, LABEL
+
+Smoothing and forecasting are separate pools because they answer different questions —
+a smoother estimates the level AT t from data up to t, a forecaster predicts t+h — and
+their residuals therefore mean different things. Encoders are separate again because
+they emit a VECTOR per patient-day rather than a value per reading.
 
 The extras are optional. A module starting with `_`, or not exposing the entry point,
 is skipped — so helpers can live in a pool directory. `source_hash` (of the module's
@@ -26,7 +33,9 @@ from typing import Any
 # pool -> the callable(s) a module must expose to count as a method
 POOLS: dict[str, tuple[str, ...]] = {
     "smoothing": ("smooth_dataframe",),
+    "forecasting": ("forecast",),
     "cpd": ("detect",),
+    "encoders": ("encode",),
     "models": ("fit", "predict_proba"),
     "metrics": ("compute",),
 }
