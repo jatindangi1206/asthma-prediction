@@ -557,12 +557,12 @@ def _check_cpd_settings() -> None:
                                                              **mod.DEFAULTS)
         assert all(np.array_equal(a[k], b[k]) for k in a), f"{name}: DEFAULTS != none"
     # An override reaches the method; a misspelt one raises instead of being ignored.
-    config.CPD_SETTINGS["_t"] = {"kcpd": {"window": 99}, "detect": {"burn_in_n": 7}}
+    config.CPD_SETTINGS["_t"] = {"kcpd": {"half_min": 99}, "detect": {"burn_in_min": 7}}
     try:
         step, per = D.cpd_settings("_t", ("kcpd", "bocpd"))
-        assert per["kcpd"]["window"] == 99 and step["burn_in_n"] == 7, (step, per)
+        assert per["kcpd"]["half_min"] == 99 and step["burn_in_min"] == 7, (step, per)
         assert per["bocpd"] == registry.get("cpd", "bocpd").defaults
-        config.CPD_SETTINGS["_t"] = {"kcpd": {"windw": 99}}
+        config.CPD_SETTINGS["_t"] = {"kcpd": {"half_mn": 99}}
         try:
             D.cpd_settings("_t", ("kcpd",))
             raise AssertionError("a misspelt CPD setting was silently ignored")
@@ -575,6 +575,182 @@ def _check_cpd_settings() -> None:
     differ = {m for m in p_hrv if p_hrv[m] != p_hr[m]} | ({"detect"} if s_hrv != s_hr else set())
     print(f"  cpd          settings per channel {sorted(config.CPD_SETTINGS)}; "
           f"hr differs from hrv in {sorted(differ) or 'nothing yet'}")
+
+
+def _synthetic_patient(channel: str, days: int, seed: int) -> pd.DataFrame:
+    """No-change noise shaped like the channel: OU memory, heavy tails, a day/night
+    swing in spread, and gaps (some over 180 min)."""
+    rng = np.random.default_rng(seed)
+    step = 1.0 if channel == "hr" else 10.0
+    t = np.arange(0, days * 1440, step)
+    keep = np.ones(t.size, bool)
+    for d in range(days):
+        g0 = d * 1440 + rng.uniform(600, 900)
+        keep &= ~((t > g0) & (t < g0 + rng.choice([20, 90, 240])))
+    t = t[keep]
+    tau, a = (8.0, 0.9) if channel == "hr" else (35.0, 0.25)
+    x = np.zeros(t.size)
+    for i in range(1, t.size):
+        phi = np.exp(-(t[i] - t[i - 1]) / tau)
+        x[i] = phi * x[i - 1] + np.sqrt(a * (1 - phi * phi)) * rng.standard_normal()
+    r = (x + rng.standard_t(5, t.size) / np.sqrt(5 / 3) * np.sqrt(1 - a)) \
+        * np.where((t % 1440) < 360, 0.5, 1.0) * (4.0 if channel == "hr" else 18.0)
+    col, raw = (("residual_hr", "hr") if channel == "hr" else ("residual_hrv", "hrvValue"))
+    return pd.DataFrame({"p_id": "x", "createdTime": pd.Timestamp("2026-01-01")
+                         + pd.to_timedelta(t, unit="m"), col: r, raw: 60 + r}), col, raw
+
+
+def _check_state_correction() -> None:
+    """Sleep / active / rest correct the hour profile: when the spread halves during
+    sleep blocks that are unrelated to the clock, only the state correction can see it,
+    and after it z has the same spread in every state."""
+    from wearable.cpd import _whiten as W
+
+    rng = np.random.default_rng(7)
+    t = np.arange(0, 20 * 1440, 10.0)
+    stamp = (np.datetime64("2026-01-01") + (t * 60).astype("timedelta64[s]")).astype("datetime64[ns]")
+    state = np.where((t // 240) % 3 == 0, W.SLEEP, np.where((t // 240) % 3 == 1, W.ACTIVE, W.REST))
+    r = rng.standard_normal(t.size) * np.where(state == W.SLEEP, 0.5, 1.0)
+    cfg = {**W.DEFAULTS, "step_min": 10.0}
+    spread = {}
+    for label, s in (("hour", None), ("hour x state", state)):
+        nm = W.noise_model(stamp, t, r, r, np.zeros(t.size, int), cfg, s)
+        z, a = nm["z"], nm["armed"]
+        spread[label] = [float(np.std(z[a & (state == k)])) for k in (W.SLEEP, W.REST)]
+    assert spread["hour"][0] < 0.75 * spread["hour"][1], spread          # sleep looks calm
+    assert abs(spread["hour x state"][0] / spread["hour x state"][1] - 1) < 0.15, spread
+    print(f"  state        sleep/rest spread of z {spread['hour'][0]/spread['hour'][1]:.2f} "
+          f"with hour only -> {spread['hour x state'][0]/spread['hour x state'][1]:.2f} "
+          f"with hour x state")
+
+
+def _check_sts() -> None:
+    """The STS calibration (`cpd/_sts.py`, `calibration="sts"`):
+
+    * gaps preserved — synthetic readings fall exactly on the history's own timestamps
+      (shifted by whole days) with its own states, and nowhere else;
+    * reproducible — the same seed gives the same values; another seed, other values;
+    * calibration behaviour — on data generated FROM a known model, the fit recovers it,
+      every no-change alarm rate it records is at or under its target, and the real
+      alarm rate stays bounded;
+    * causal — the whole detect step calibrated by STS gives the same output on a prefix
+      as on the full series.
+    """
+    from wearable.cpd import _sts as S, _whiten as W
+    from wearable.steps import detect as D
+
+    rng = np.random.default_rng(11)
+    # a known patient: 14 days of 10-min readings with gaps, sleep 00-07 lowering log-HRV
+    # by 0.35, AR(1) 0.6 between readings, heavy-tailed noise
+    t = np.arange(0, 14 * 1440, 10.0)
+    t = t[~(((t % 1440) > 600) & ((t % 1440) < 690))]                 # a daily gap
+    t = t[~((t > 5 * 1440) & (t < 5 * 1440 + 300))]                    # one > H8 gap
+    stamp = (np.datetime64("2026-01-01") + (t * 60).astype("timedelta64[s]")).astype("datetime64[ns]")
+    # sleep onset and length vary night to night (a fixed clock window would be
+    # collinear with the 24-h profile and the sleep effect unidentifiable)
+    day_i = (t // 1440).astype(int)
+    onset = rng.uniform(-120, 120, day_i.max() + 1)[day_i]
+    length = rng.uniform(300, 540, day_i.max() + 1)[day_i]
+    tod = (t % 1440) - onset
+    state = np.where((tod >= 0) & (tod < length), W.SLEEP,
+                     np.where(rng.random(t.size) < 0.4, W.ACTIVE, W.REST))
+    x = np.zeros(t.size)
+    for i in range(1, t.size):
+        x[i] = 0.6 * x[i - 1] + 0.25 * rng.standard_normal()
+    logy = np.log(60) - 0.35 * (state == W.SLEEP) + x + 0.15 * rng.standard_t(5, t.size)
+    value = np.exp(logy)
+    cfg = {**S.DEFAULTS, **config.STS_SETTINGS["hrv"], "reading_min": 10.0}
+    hist = stamp < stamp[0] + np.timedelta64(7, "D")
+    f = S.fit(stamp[hist], value[hist], state[hist], cfg)
+    assert f is not None and f["model"] == "full", f
+    p = f["params"]
+    # AR + white noise is barely identifiable from AR(2) alone, so compare what the data
+    # pin down: the implied lag-1 autocorrelation of AR + noise. True: 0.6*v/(v+n) with
+    # v = 0.25^2/(1-0.36), n = 0.15^2*5/3 -> 0.434.
+    a1, a2 = p["ar.L1"], p["ar.L2"]
+    v_ar = p["sigma2.ar"] * (1 - a2) / ((1 + a2) * ((1 - a2) ** 2 - a1 ** 2))
+    rho1 = a1 / (1 - a2) * v_ar / (v_ar + p["sigma2.irregular"])
+    assert abs(rho1 - 0.434) < 0.1, (rho1, p)                   # autocorrelation recovered
+    assert abs(p["beta.x1"] - (-0.35)) < 0.15, p                # sleep effect recovered
+    # gaps preserved, block by block; reproducible
+    ss, sv, sk = S.simulate(f, stamp[hist], state[hist], 30 * 1440, cfg, seed=3)
+    n_h = int(hist.sum())
+    span = int(np.ceil((f["end"] - stamp[0]) / np.timedelta64(1, "D")))
+    for b in range(len(sv) // n_h):
+        blk = slice(b * n_h, (b + 1) * n_h)
+        assert np.array_equal(ss[blk], stamp[hist] + (b * (span + 1) + span) * np.timedelta64(1, "D")), b
+        assert np.array_equal(sk[blk], state[hist]), b
+    assert np.all((sv >= cfg["lo"]) & (sv <= cfg["hi"]))
+    assert np.array_equal(sv, S.simulate(f, stamp[hist], state[hist], 30 * 1440, cfg, seed=3)[1])
+    assert not np.array_equal(sv, S.simulate(f, stamp[hist], state[hist], 30 * 1440, cfg, seed=4)[1])
+    # through the detect step: thresholds at target on the null, causal end to end
+    df = pd.DataFrame({"p_id": "sts", "createdTime": pd.to_datetime(stamp), "hrvValue": value})
+    from wearable.smoothing import anrewma
+    sm = anrewma.smooth_dataframe(df, patient_col="p_id", timestamp_col="createdTime",
+                                  value_col="hrvValue", out_col="smoothed_hrv")
+    df["residual_hrv"] = df["hrvValue"].to_numpy() - sm.sort_values("createdTime")["smoothed_hrv"].to_numpy()
+    step, per = D.cpd_settings("hrv", cpd.DEFAULT_ENSEMBLE)
+    step = {**step, "recal_days": 3.0, "null_days": 20.0}          # keep selftest quick
+    ctx = {"method": "sts", "on": "residual", "val": "hrvValue", "smoother": ("anrewma", {}),
+           "sts_cfg": {**cfg, "reading_min": step["step_min"]}}
+    full = D._detect_patient(df, "residual_hrv", "hrvValue", cpd.DEFAULT_ENSEMBLE, per, step,
+                             1 / 3, ctx)
+    rows = pd.DataFrame(full.attrs["calibration"])
+    assert len(rows) >= 2 and rows["calibration"].str.startswith("sts").any(), rows["calibration"]
+    share = (1 / 3) / len(cpd.DEFAULT_ENSEMBLE)
+    for c in rows.filter(like="null_rate_"):
+        n_streams = sum(1 for k in rows if k.startswith(f"null_rate_{c.split('_')[2]}_"))
+        assert (rows[c].dropna() <= share / n_streams + 1e-9).all(), (c, rows[c].tolist())
+    arm = full[full["armed"] == 1]
+    rate = W.events(arm["anomaly_present"].to_numpy() == 1) / (len(arm) * 10 / 1440)
+    assert rate <= 2.0, rate
+    cut = int(len(df) * 0.7)
+    pre = D._detect_patient(df.iloc[:cut].copy(), "residual_hrv", "hrvValue",
+                            cpd.DEFAULT_ENSEMBLE, per, step, 1 / 3, ctx)
+    a, b = full.iloc[:cut].reset_index(drop=True), pre.reset_index(drop=True)
+    bad = [c for c in a.columns if not a[c].equals(b[c])]
+    assert not bad, f"STS calibration is not causal: a prefix run differs in {bad}"
+    print(f"  sts          gaps and states preserved per block; reproducible; fitted "
+          f"lag-1 {rho1:.2f} (true 0.43), sleep {p['beta.x1']:.2f} (true -0.35); no-change "
+          f"rates at or under target; real {rate:.2f}/worn day; causal end to end")
+
+
+def _check_detect_pipeline() -> None:
+    """The whole detect step on synthetic no-change patients, per channel:
+
+    * causal — a run on a prefix reproduces the full run wherever they overlap (all
+      columns, every detector, the noise model, the calibration), except the one bin
+      still open at the cut when the channel is binned;
+    * calibrated — on pure noise the ensemble stays within a few times its budget
+      (0.33 per worn day), where the old detectors fired ~38 times per worn day on real
+      HR. Not exactly at budget: in the first week the thresholds come from a twin of a
+      single worn day (decision: no population prior), which understates how much later
+      days differ, so that week runs hotter.
+    """
+    from wearable.cpd import _whiten
+    from wearable.steps import detect as D
+
+    rates = {}
+    for channel, days in (("hrv", 20), ("hr", 6)):
+        df, col, raw = _synthetic_patient(channel, days, 1)
+        step, per = D.cpd_settings(channel, cpd.DEFAULT_ENSEMBLE)
+        step = {**step, "recal_days": 3.0}            # recalibrate inside the series
+        full = D._detect_patient(df, col, raw, cpd.DEFAULT_ENSEMBLE, per, step, 1 / 3)
+        cut = int(len(df) * 0.7)
+        pre = D._detect_patient(df.iloc[:cut].copy(), col, raw, cpd.DEFAULT_ENSEMBLE,
+                                per, step, 1 / 3)
+        keep = (pre.createdTime < pre.createdTime.iloc[-1]
+                - pd.Timedelta(minutes=step["bin_min"])).to_numpy()
+        a = full.iloc[:cut].reset_index(drop=True)[keep]
+        b = pre.reset_index(drop=True)[keep]
+        bad = [c for c in a.columns if not a[c].equals(b[c])]
+        assert not bad, f"{channel}: a prefix run differs from the full run in {bad}"
+        arm = full[full["armed"] == 1]
+        worn = len(arm) * step["step_min"] / 1440
+        rates[channel] = _whiten.events(arm["anomaly_present"].to_numpy() == 1) / worn
+        assert rates[channel] <= 2.0, (channel, rates[channel])
+    print(f"  detect       causal end to end (prefix == full); on pure noise the ensemble "
+          f"fires {rates['hrv']:.2f} (hrv) / {rates['hr']:.2f} (hr) per worn day, budget 0.33")
 
 
 def _check_join_embedding() -> None:
@@ -666,6 +842,9 @@ def run() -> None:
     _check_store()
     _check_vote()
     _check_cpd_settings()
+    _check_state_correction()
+    _check_detect_pipeline()
+    _check_sts()
     _check_metrics()
     _check_event_metrics()
     _check_channels()

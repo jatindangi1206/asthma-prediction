@@ -44,7 +44,7 @@ wearable/
   smoothing/       10 methods        smooth_dataframe(...)
   forecasting/     3 methods         forecast(contexts, horizon) -> (median, quantiles)
   encoders/        2 methods         encode(series) -> (n, d)
-  cpd/             4 methods         detect(time, values, priors)
+  cpd/             5 methods         detect(time, values, priors) + score(); _whiten.py
   models/          10 models         fit(...) + predict_proba(...)
   metrics/         19 metrics        compute(...) + KIND
   steps/           ingest · smooth · forecast · detect · encode · join · model · evaluate
@@ -136,7 +136,7 @@ straight through as kwargs (so `--limit` works there; `chain` has no `--limit`).
 **Artifact specs** are `step:method[:key]` with the split at the *first* colon (method
 names contain colons: `join:smooth:gammadglm`, `evaluate:model:logreg`). Without a key
 the newest complete artifact of that name wins. Detect artifacts are named by the
-ensemble (`detect:bocpd+kcpd+kalman+hmm`), not by `--on`/`--smoothing`, so runs on
+ensemble (`detect:bocpd+kcpd+kalman+hmm+drift`), not by `--on`/`--smoothing`, so runs on
 different signals share a name — pass the key from `runs` when that matters. Join
 artifacts are the same: the name is the input combination, not `--target`/`--days`/
 `--horizon`, so every window and both tasks share one name. The cache keys them
@@ -190,7 +190,7 @@ In all three cases pass `--force` (it cascades through `chain`), or delete the s
 | a data format | `patients()` + `load(pid)` in `wearable/sources.py` + one `Source(...)` | every step unchanged |
 | a signal channel | one entry in `config.CHANNELS` | ingest writes it; `--signal` smooths and detects it |
 | a smoother | `wearable/smoothing/<name>.py` with `smooth_dataframe` | nothing — it is discovered |
-| a detector | `wearable/cpd/<name>.py` with `detect` | add the key to `DEFAULT_ENSEMBLE` to put it in the vote |
+| a detector | `wearable/cpd/<name>.py` with `detect` (+ `score` or `threshold_for` to be calibrated) | add the key to `DEFAULT_ENSEMBLE` to put it in the vote |
 | a model | `wearable/models/<name>.py` with `fit` + `predict_proba` | nothing |
 | a metric | `wearable/metrics/<name>.py` with `compute` + `KIND` | nothing — it appears in every comparison |
 | an input variant | one entry in `experiment.INPUTS` | nothing — `sweep inputs` picks it up |
@@ -539,15 +539,75 @@ named `<method>@<signal>`, as smooth and forecast already were. Without that, HR
 HRV would share a column prefix in `join`. Cost: HR has ~16x HRV's readings, so the first
 HR detect pass is the slow one (cached after).
 
-**CPD settings are per channel: `config.CPD_SETTINGS`.** Each detector's knobs are its
-`DEFAULTS` (tuned on HRV at 10-min cadence). `detect(time, values, priors, **params)`
-takes them, and `config.CPD_SETTINGS[<channel>][<detector>]` overrides them for one
-channel. A `detect` entry holds the step's `burn_in_n`/`pop_n0`. Window lengths, strides,
-half-lives, `min_run`, `acf_win` and `burn_in_n` are all counted in **samples**, so one
-number means ~10x less time on HR than on HRV. Untuned, HR fires ~60x more events than
-HRV (5-patient check: 39,312 vs 637). The resolved settings are in the detect cache key,
-so editing one channel's block recomputes only that channel. A misspelt name raises.
-`wearable list` prints both blocks.
+## Change-point detection: noise model, calibration, causality
+
+Design and the measurements behind it: https://claude.ai/artifact/CDgdpCNWBYfiZrqGdNiVh9
+(decisions of 2 Nov 2026). Five detectors (`bocpd kcpd kalman hmm drift`, all in
+`DEFAULT_ENSEMBLE`; `drift` compares each night's *sleep* level, 18:00–12:00, with the
+patient's recent nights) read the column through a per-patient, per-channel **noise model**,
+`cpd/_whiten.py` (a `_` helper, not a method):
+
+- **Binning.** HR is median-binned to 5 min first (`bin_min`). Its correlation time is
+  ~9 min, so little is lost, and 1–5-min surges (posture, movement) stop dominating.
+  Each reading holds the output of the latest *closed* bin (causal).
+- **Arming.** Nothing alarms before the patient's own first worn day (`burn_in_min` =
+  1440 worn minutes). There is no population prior; that was a decision.
+- **Whitening.** The residual is centred and scaled by hour of day (smoothed ±2 h), then
+  corrected by behavioural state. That state is SLEEP (sleep_active), ACTIVE (awake,
+  steps_active) or REST (awake, no steps), taken over the minutes a reading covers (HRV
+  10, HR 1). Each state gets its own centre offset and scale ratio, shrunk toward none
+  when rare; no flags means UNKNOWN, with no correction. Measured, clock hour explains
+  the spread about 2× better than state, but state adds to it, so it is hour × state.
+  Then a Huber-robust Kalman filter on an OU + white-noise model turns it into
+  innovations `z`. A long gap decays its memory, and an H8 reset clears it. It is refitted at arming
+  and every midnight from the trailing `baseline_days`, skipping abnormal days
+  (>`abnormal_frac` of |z|>3).
+- **Settle windows** after a re-entry (`reentry_gap_min`) or an H8 reset: detectors
+  update but stay unarmed. The level jump across the gap goes to the step-level columns
+  `reentry_jump_z` / `reentry_gap_min`, never to an alarm.
+- **Calibration ("jumpiness").** No labels are used. A no-change *twin* is built from
+  whole days of the patient's own trailing data, resampled in shuffled order and run
+  through the same noise model. Each detector's `score()` is thresholded on the twin so
+  that the ensemble fires `budget` times per worn day, split evenly across detectors
+  and their statistics. It is rebuilt every `recal_days`, so thresholds are
+  per-reading arrays. `drift` uses an analytic CUSUM threshold (`threshold_for`). The
+  budget is a detect param keyed in the cache, `config.CPD_BUDGETS = (1/7, 1/3, 1)`, and
+  a sweep axis: `--cpd_budget 0.142857,0.333333,1.0`. `cpd_budget` is a runs column.
+- **Calibration method** (`config.CPD_CALIBRATION`, `detect --calibration`,
+  `sweep ... --cpd_calibration shuffle,sts`). `shuffle` (default) is the day-resampled
+  twin above. `sts` (`cpd/_sts.py`) fits a per-patient structural time-series model on
+  past readings at native resolution: log scale, fixed level, a deterministic 24 h
+  harmonic seasonal, AR(2), sleep/active regressors and Student-t noise, on a clock-time
+  grid with the gaps as NaN. It simulates new values on the history's own observation
+  mask, in independent weekly blocks, and pushes them through the *same* smoother,
+  binning, noise model and detectors. A random-walk level was tried and rejected: it
+  wanders unboundedly (simulated HR 50–190 bpm against a real 80–115). Under 3 days of
+  history the circadian term is dropped; a failed fit falls back to shuffle for that
+  recalibration, recorded as such. `--on surprise|tail` raises: it would need the
+  forecaster run per simulation. `STS_SETTINGS` are keyed only for `sts`, so the
+  default's keys are untouched. Both methods write a `calibration` table beside
+  `detected` (per patient × recalibration: method used, STS parameters, every threshold,
+  the achieved no-change rate), and `scripts/cpd_calibration_compare.py` compares them.
+  Known limits: AR(2) fits mostly settle on one root, so hours-scale autocorrelation is
+  under-modelled (HR at 60 min: 0.43 synthetic against 0.62 real), and STS cannot
+  reproduce the HRV pile-up at 120–129.
+- **Settings** are in minutes, per channel, in `config.CPD_SETTINGS`. The `detect`
+  block holds the noise model's; the others override each detector's `DEFAULTS`. A
+  misspelt name raises. Everything is in the detect cache key. `wearable list` prints
+  both channels.
+
+**Every piece is causal.** `selftest` runs the whole detect step on synthetic patients,
+on a prefix and on the full series, and asserts they agree. The HMM filters forward;
+there is no Viterbi and no EM. Two things are *not* exactly as designed:
+- **Measured alarm rates are about 4× the budget on real data.** Full cohort at 1/3:
+  HRV 1.39 and HR 1.45 events per worn day (per-patient median 1.45 / 1.61), with
+  8.6% / 9.8% of armed time flagged. The original detectors gave 0.8 and 37.7 events
+  and flagged 48% of HR. Real data contains real changes, and the twin cannot show
+  everything. Read the budget as a sensitivity *setting* that orders the three detect
+  builds, not as a guaranteed alarm rate. `drift` flags only the reading where its
+  nightly verdict arrives, and restarts its CUSUM after each signal.
+- **The first week runs hotter.** Thresholds there come from a twin of a single worn
+  day, which understates how much later days differ.
 
 **The encoder window follows `--days`.** `experiment.inputs` embeds the `days` window
 ending on each day at `profile = bins_for(days, CONTEXT)`, so the ablation varies
@@ -740,10 +800,11 @@ aggregate-only.
   exception, pinned by the test: `join` imports `detect._load_input` for the raw-only
   baseline. `scripts/` may import anything (`plot_patient.py` uses `__main__._resolve`).
 - Prefer data-driven per-patient priors over hard-coded scales (H10).
-- Determinism: `kcpd` seeds `np.random.default_rng(0)`, `hmm` uses `random_state=42`,
-  models take an explicit seed. Given identical inputs, outputs are byte-reproducible —
+- Determinism: `kcpd` seeds `np.random.default_rng(0)`, each calibration twin is seeded
+  by its position, and models take an explicit seed. Given identical inputs, outputs are byte-reproducible —
   the restructure to the package was verified this way (192/192 processed, smoothed and
   calibrated files byte-identical).
-- Parallelism: ingest and smooth use `ProcessPoolExecutor` (`cpu_count − 1`); detect
-  runs patient-by-patient. KCPD's permutation test is the heaviest step — a full
-  4-detector detect is ~10-15 min for 188 patients.
+- Parallelism: ingest, smooth and detect use `ProcessPoolExecutor` (`cpu_count − 1`;
+  detect parallelises over patients). Calibration dominates detect: the twin is rebuilt
+  weekly and every detector is scored on 60 worn days of it, so an HR patient takes
+  ~1.5 min of one core.

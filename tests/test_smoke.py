@@ -72,3 +72,10 @@ def test_cache_key_covers_everything_that_matters():
     assert k != store.make_key("smooth", "m", {"a": 1}, [{"key": "k1"}], "h1")
     assert k != store.make_key("smooth", "m", {"a": 1}, [{"key": "k0"}], "h2")
     assert k != store.make_key("detect", "m", {"a": 1}, [{"key": "k0"}], "h1")
+
+
+def test_sts_calibration():
+    """STS calibration: gaps preserved, reproducible, recovers a known model, thresholds
+    at target on its no-change data, causal end to end (see selftest._check_sts)."""
+    from wearable import selftest
+    selftest._check_sts()

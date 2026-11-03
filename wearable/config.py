@@ -11,37 +11,68 @@ MIN_SEGMENT_ROWS = 10       # a shorter chunk is left unsmoothed
 
 # ---- CPD cold start ------------------------------------------------------------
 BURN_IN_N = 144             # valid samples (24h at 10-min) to ARM, counted across chunks
-POP_N0 = 30                 # population-prior pseudo-count (shrinkage strength)
-POP_SIGMA0_DEFAULT = 15.0   # fallback prior if the cohort median is unavailable
 
 # ---- CPD settings, per channel -----------------------------------------------------
-# Change-point detection runs on each channel separately, and the channels differ ~10x
-# in cadence (HRV a reading per ~10 min, HR per ~1 min). Every count below is in
-# SAMPLES, so the same number means a different stretch of time on each channel —
-# which is why each channel has its own block. `detect` holds the step's cold-start
-# knobs; the others are the detectors' (see each module's DEFAULTS for what they mean).
-# A channel or detector missing here falls back to those DEFAULTS. Every value is part
-# of the detect cache key, so editing one recomputes only that channel's detection.
-# HR starts as an exact copy of HRV: identical until it is tuned.
+# Change-point detection runs on each channel separately, through a per-patient noise
+# model (`cpd/_whiten.py`) that whitens the residual first. Everything about TIME is in
+# minutes and converted per channel; nothing is counted in readings. `detect` holds the
+# noise model's and the step's settings; the others are the detectors' (see each
+# module's DEFAULTS). A channel or detector missing here falls back to those DEFAULTS.
+# Every value is in the detect cache key, so editing one recomputes only that channel.
+# Measured cadence: HR one reading a minute, HRV one every ~10 min (irregular). HR is
+# median-binned to 5 min first (`bin_min`), so its re-entry gap is 3 bins (15 min).
 CPD_SETTINGS = {
     "hrv": {
-        "detect": {"burn_in_n": BURN_IN_N, "pop_n0": POP_N0},
-        "bocpd":  {"hazard_lambda": 1000, "min_run": 6, "drop_frac": 0.5},
-        "kcpd":   {"window": 18, "n_perm": 80, "stride": 3, "min_effect_z": 10.0,
-                   "studentize": True, "stud_halflife": 36},
-        "kalman": {"r_scale": 1.0, "q_factor": 1e-3, "cusum_k": 0.5, "cusum_h": 3.0,
-                   "acf_win": 12, "acf_h": 0.6},
-        "hmm":    {"stickiness": 0.95, "state1_var_mult": 9.0},
+        "detect": {"step_min": 10.0, "burn_in_min": 1440.0, "baseline_days": 14.0,
+                   "state_window_min": 10.0,
+                   "abnormal_frac": 0.3, "reentry_gap_min": 60.0, "settle_min": 20.0,
+                   "settle_h8_min": 30.0, "null_days": 60.0, "recal_days": 7.0,
+                   "bin_min": 0.0},
+        "bocpd":  {"lambda_min": 4320.0, "window_min": 60.0, "max_hyp": 300},
+        "kcpd":   {"half_min": 180.0, "stride_min": 30.0, "coverage": 0.7,
+                   "bin_min": 0.0, "n_perm": 80},
+        "kalman": {"cusum_k": 0.5, "acf_window_min": 120.0, "coverage": 0.7},
+        "hmm":    {"dwell_normal_min": 1440.0, "dwell_volatile_min": 120.0,
+                   "state1_var_mult": 9.0},
+        "drift":  {"window_start_h": 18, "window_end_h": 12, "baseline_nights": 28,
+                   "min_nights": 3, "min_sleep_minutes": 60.0, "direction": -1,
+                   "cusum_k": 0.5},
     },
     "hr": {
-        "detect": {"burn_in_n": BURN_IN_N, "pop_n0": POP_N0},
-        "bocpd":  {"hazard_lambda": 1000, "min_run": 6, "drop_frac": 0.5},
-        "kcpd":   {"window": 18, "n_perm": 80, "stride": 3, "min_effect_z": 10.0,
-                   "studentize": True, "stud_halflife": 36},
-        "kalman": {"r_scale": 1.0, "q_factor": 1e-3, "cusum_k": 0.5, "cusum_h": 3.0,
-                   "acf_win": 12, "acf_h": 0.6},
-        "hmm":    {"stickiness": 0.95, "state1_var_mult": 9.0},
+        "detect": {"step_min": 1.0, "burn_in_min": 1440.0, "baseline_days": 14.0,
+                   "state_window_min": 1.0,
+                   "abnormal_frac": 0.3, "reentry_gap_min": 15.0, "settle_min": 30.0,
+                   "settle_h8_min": 30.0, "null_days": 60.0, "recal_days": 7.0,
+                   "bin_min": 5.0},
+        "bocpd":  {"lambda_min": 4320.0, "window_min": 60.0, "max_hyp": 300},
+        "kcpd":   {"half_min": 180.0, "stride_min": 30.0, "coverage": 0.7,
+                   "bin_min": 0.0, "n_perm": 80},
+        "kalman": {"cusum_k": 0.5, "acf_window_min": 120.0, "coverage": 0.7},
+        "hmm":    {"dwell_normal_min": 1440.0, "dwell_volatile_min": 120.0,
+                   "state1_var_mult": 9.0},
+        "drift":  {"window_start_h": 18, "window_end_h": 12, "baseline_nights": 28,
+                   "min_nights": 3, "min_sleep_minutes": 60.0, "direction": 1,
+                   "cusum_k": 0.5},
     },
+}
+# How often the whole detector ensemble may fire on no-change noise built from the
+# patient's own data, per worn day (1440 worn minutes). Split evenly across detectors,
+# and across a detector's statistics. No labels are involved. The experiment compares
+# all three; CPD_BUDGET is the default.
+CPD_BUDGETS = (1 / 7, 1 / 3, 1.0)
+CPD_BUDGET = 1 / 3
+# How the no-change data for those thresholds is built. "shuffle" (the default) resamples
+# whole days of the patient's own past; "sts" simulates from a structural time-series
+# model fitted on that past (`cpd/_sts.py`), on the same observation mask, through the
+# same smoother and noise model. STS_SETTINGS are keyed only when "sts" is used, so the
+# default's cache keys are untouched.
+CPD_CALIBRATION = "shuffle"
+CPD_CALIBRATIONS = ("shuffle", "sts")
+STS_SETTINGS = {
+    "hrv": {"grid_min": 10.0, "harmonics": 2, "fit_days": 7.0, "min_days": 3.0,
+            "lo": 1.0, "hi": 129.0, "maxiter": 60},          # the device caps HRV at 129
+    "hr":  {"grid_min": 1.0, "harmonics": 2, "fit_days": 7.0, "min_days": 3.0,
+            "lo": 25.0, "hi": 230.0, "maxiter": 60},
 }
 
 # ---- Experiment defaults -------------------------------------------------------

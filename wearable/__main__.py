@@ -135,7 +135,7 @@ def _list() -> None:
           f"this many days (ablation {list(config.WINDOW_HORIZON)})")
     print(f"\nensemble       {list(cpd.DEFAULT_ENSEMBLE)}")
     from wearable.steps.detect import cpd_settings
-    print("cpd settings   per channel, config.CPD_SETTINGS (counts are in samples)")
+    print("cpd settings   per channel, config.CPD_SETTINGS (time in minutes)")
     for ch in config.CPD_SETTINGS:
         step, per = cpd_settings(ch, cpd.DEFAULT_ENSEMBLE)
         for i, (name, knobs) in enumerate([("detect", step), *per.items()]):
@@ -234,6 +234,11 @@ def main(argv: list[str] | None = None) -> None:
         ap.add_argument("--signal", default=config.DEFAULT_CHANNEL,
                         choices=sorted(config.CHANNELS),
                         help="which channel to detect on")
+        ap.add_argument("--budget", type=float, default=config.CPD_BUDGET,
+                        help="ensemble alarms per worn day on no-change data")
+        ap.add_argument("--calibration", default=config.CPD_CALIBRATION,
+                        choices=config.CPD_CALIBRATIONS,
+                        help="how the no-change data is built: shuffled days or STS")
         ap.add_argument("--force", action="store_true")
         a = ap.parse_args(rest)
         if a.on == "raw":
@@ -244,7 +249,8 @@ def main(argv: list[str] | None = None) -> None:
         else:
             src = smooth.run(a.smoothing, force=a.force, signal=a.signal)
         detect.run(a.methods.split(","), on=a.on, input_artifact=src,
-                   force=a.force, signal=a.signal)
+                   force=a.force, signal=a.signal, budget=a.budget,
+                   calibration=a.calibration)
         return
 
     if cmd == "forecast":

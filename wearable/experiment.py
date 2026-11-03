@@ -28,7 +28,7 @@ from __future__ import annotations
 import pandas as pd
 
 from wearable import cpd, encoders, forecasting, metrics, models, registry, smoothing
-from wearable.config import (DAYS, DEFAULT_JOIN_CHANNELS,
+from wearable.config import (CPD_BUDGET, CPD_CALIBRATION, DAYS, DEFAULT_JOIN_CHANNELS,
                              HORIZON, PATH_SIGNALS, PROFILE, PROFILE_BINS,
                              REPORTS_DIR, SEED, SEEDS, TEST_FRACTION, TEST_PCT,
                              WINDOW_DAYS, WINDOW_HORIZON)
@@ -241,7 +241,8 @@ def inputs(smooth_method: str | None = None, detect_on: str | None = None,
            cpd_methods=cpd.DEFAULT_ENSEMBLE, force: bool = False,
            limit: int | None = None, smoothing_params: dict | None = None,
            forecast_method: str | None = None, encode_method: str | None = None,
-           signals=PATH_SIGNALS, days: int = DAYS):
+           signals=PATH_SIGNALS, days: int = DAYS, cpd_budget: float = CPD_BUDGET,
+           cpd_calibration: str = CPD_CALIBRATION):
     """The artifacts `join` should receive for one input variant, in join order.
 
     Each of smoothing, forecasting and encoding is an independent frozen stage, and CPD
@@ -273,7 +274,8 @@ def inputs(smooth_method: str | None = None, detect_on: str | None = None,
                 raise ValueError(f"detect_on={detect_on!r} needs a {need}; "
                                  f"use 'raw' to detect on the unsmoothed signal")
             artifacts.append(detect.run(cpd_methods, on=detect_on, input_artifact=src,
-                                        force=force, limit=limit, signal=signal))
+                                        force=force, limit=limit, signal=signal,
+                                        budget=cpd_budget, calibration=cpd_calibration))
         if encode_method:
             ceiling = getattr(registry.get("encoders", encode_method).load(),
                               "CONTEXT", None)
@@ -303,7 +305,8 @@ def run_one(variant: str = "raw", task: str = "detection",
             boot: int | None = None, stratify: bool = True,
             smoothing_params: dict | None = None, model_params: dict | None = None,
             days: int = DAYS, horizon: int = HORIZON, profile: int = PROFILE,
-            channels=DEFAULT_JOIN_CHANNELS, patients=None, signals=PATH_SIGNALS):
+            channels=DEFAULT_JOIN_CHANNELS, patients=None, signals=PATH_SIGNALS,
+            cpd_budget: float = CPD_BUDGET, cpd_calibration: str = CPD_CALIBRATION):
     """One cell of the experiment: one input variant, one task, one model, one fold.
 
     The seed drives both the split and the model, as in the reference design, so a cell
@@ -314,7 +317,8 @@ def run_one(variant: str = "raw", task: str = "detection",
     signals = _as_list(signals)
     arts = variant_inputs(variant, smoothing_method, cpd_methods=cpd_methods,
                           force=force, limit=limit, smoothing_params=smoothing_params,
-                          signals=signals, days=days)
+                          signals=signals, days=days, cpd_budget=cpd_budget,
+                          cpd_calibration=cpd_calibration)
     j = join.run(arts, target=task, seed=seed, test_fraction=test_fraction,
                  force=force, stratify=stratify, days=days, horizon=horizon,
                  profile=profile, channels=channels, patients=patients)
@@ -322,7 +326,10 @@ def run_one(variant: str = "raw", task: str = "detection",
                        **(model_params or {}))
     e = evaluate.run(m, force=force, boot=boot)
     return {"variant": variant, "task": task, "model": model,
-            "signals": ",".join(signals), "join": j,
+            "signals": ",".join(signals),
+            "cpd_budget": cpd_budget if INPUTS[variant]["detect_on"] else None,
+            "cpd_calibration": cpd_calibration if INPUTS[variant]["detect_on"] else None,
+            "join": j,
             "model_artifact": m, "evaluate": e, "artifacts": arts}
 
 
@@ -341,7 +348,9 @@ def _cell_rows(res: dict, test_pct: int, seed: int) -> list[dict]:
     """One row for all test patients, plus one per cohort group."""
     js, ms = res["join"].manifest["stats"], res["model_artifact"].manifest["stats"]
     head = {"task": res["task"], "input": res["variant"], "model": res["model"],
-            "signals": res["signals"], "days": js.get("days"), "horizon": js.get("horizon"),
+            "signals": res["signals"], "cpd_budget": res["cpd_budget"],
+            "cpd_calibration": res["cpd_calibration"],
+            "days": js.get("days"), "horizon": js.get("horizon"),
             "profile": js.get("profile"),
             "test_pct": test_pct, "seed": seed,
             "n_features": ms.get("n_features"), "n_train": ms.get("n_train"),
@@ -379,8 +388,13 @@ def _cohort(cohort):
 
 
 def _grid(variants, model_names, task, test_pcts, seeds,
-          days_list=(DAYS,), horizons=(HORIZON,), cohort=None, **kw):
-    """Every (variant, model, days, horizon, test share, seed) cell of one task.
+          days_list=(DAYS,), horizons=(HORIZON,), cohort=None, cpd_budget=None,
+          cpd_calibration=None, **kw):
+    """Every (variant, CPD budget, model, days, horizon, test share, seed) cell of one task.
+
+    `cpd_budget` (one value or several, e.g. `config.CPD_BUDGETS`) and `cpd_calibration`
+    (e.g. "shuffle,sts") are axes only for variants that run change-point detection; the
+    others run once.
 
     Asserts the comparison is fair: within a fold, every cell must have been scored on
     the same test days and the same test patients. That holds because the split is a
@@ -395,26 +409,36 @@ def _grid(variants, model_names, task, test_pcts, seeds,
     """
     patients = _cohort(cohort)
     variants = _expand(variants)
+    budgets = [float(b) for b in _as_list(cpd_budget, [CPD_BUDGET])]
+    calibrations = _as_list(cpd_calibration, [CPD_CALIBRATION])
+    cells_axis = [(v, b, c) for v in variants
+                  for b in (budgets if INPUTS.get(v, {}).get("detect_on") else [None])
+                  for c in (calibrations if INPUTS.get(v, {}).get("detect_on") else [None])]
     rows, fold_shape, failures = [], {}, []
     for test_pct in test_pcts:
         for seed in seeds:
             for horizon in horizons:
                 for n_days in days_list:
-                    for variant in variants:
+                    for variant, budget, calibration in cells_axis:
                         for name in model_names:
                             tag = (f"{task} | {variant} | {name} | {n_days}d in"
                                    + (f" | onset <= {horizon}d" if task == "onset" else "")
+                                   + (f" | cpd {budget:.3g}/day {calibration}" if budget else "")
                                    + f" | test {test_pct}% | seed {seed}")
                             print(f"\n{'=' * 78}\n{tag}\n{'=' * 78}")
                             try:
                                 res = run_one(variant, task=task, model=name,
                                               test_fraction=test_pct / 100, seed=seed,
                                               days=n_days, horizon=horizon,
-                                              patients=patients, **kw)
+                                              patients=patients,
+                                              cpd_budget=budget or CPD_BUDGET,
+                                              cpd_calibration=calibration or CPD_CALIBRATION,
+                                              **kw)
                             except Exception as exc:
                                 print(f"  ! failed: {type(exc).__name__}: {exc}")
                                 failures.append({
                                     "task": task, "input": variant, "model": name,
+                                    "cpd_budget": budget, "cpd_calibration": calibration,
                                     "days": n_days, "horizon": horizon,
                                     "test_pct": test_pct, "seed": seed,
                                     "error": f"{type(exc).__name__}: {exc}"})
@@ -440,13 +464,15 @@ def _grid(variants, model_names, task, test_pcts, seeds,
 
 
 def summarise(runs: pd.DataFrame,
-              by=("task", "input", "model", "signals", "days", "horizon", "profile",
+              by=("task", "input", "model", "signals", "cpd_budget", "cpd_calibration",
+                  "days", "horizon", "profile",
                   "test_pct", "group")):
     """Mean and SD over seeds of every score, plus the mean interval, as in the design."""
     if not len(runs):
         return runs
     by = [c for c in by if c in runs.columns]
-    head = {"task", "input", "model", "signals", "days", "horizon", "profile",
+    head = {"task", "input", "model", "signals", "cpd_budget", "cpd_calibration", "days",
+            "horizon", "profile",
             "test_pct", "seed", "group", "model_key"}
     scores = [c for c in runs.columns
               if c not in head and not c.endswith(("_lo", "_hi"))]
@@ -460,7 +486,8 @@ def summarise(runs: pd.DataFrame,
     return runs.groupby(list(by), dropna=False).agg(**agg).reset_index()
 
 
-CELL = ["task", "input", "model", "signals", "days", "horizon", "profile", "test_pct",
+CELL = ["task", "input", "model", "signals", "cpd_budget", "cpd_calibration", "days",
+        "horizon", "profile", "test_pct",
         "seed", "group"]
 
 

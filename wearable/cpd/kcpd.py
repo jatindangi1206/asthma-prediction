@@ -1,130 +1,132 @@
-"""Kernel Change Point Detection on the RESIDUAL — online two-window MMD.
+"""Kernel Change Point Detection on the whitened residual — online two-window MMD.
 
-Replaces the old offline `ruptures` call with a causal, online detector:
+Every `stride_min` minutes, compare the PAST window (the `half_min` minutes before the
+present window) with the PRESENT window (the last `half_min` minutes) by the unbiased
+MMD² under an RBF kernel (bandwidth by the median heuristic on the block). Windows are
+defined in clock minutes, so HR and HRV compare the same stretch of time.
 
-  * window w = 18 (3 h per side): compare the PAST 3h window to the PRESENT 3h.
-  * kernel bandwidth σ = median heuristic on the current 2w block (adapts).
-  * statistic = Maximum Mean Discrepancy (MMD²) between the two windows.
+Validity rules, from what this cohort's data look like:
+  * a window never crosses an H8 chunk reset (the smoother restarted there, so a splice
+    would look like a shift) — `priors["chunk"]`;
+  * each half must hold at least `coverage` of its expected readings — HRV is irregular
+    (one step in ten is longer than 30 min), so strict contiguity would leave few
+    windows, while a half that is mostly empty would compare almost nothing;
+  * HR is first binned to `bin_min`-minute medians: its readings are correlated over
+    ~9 minutes, so 5-minute bins lose little information and shrink the Gram matrices.
 
-RECALIBRATION (why this differs from a plain permutation test)
---------------------------------------------------------------
-A naive "fire if permutation p < 0.05" over-fires badly on HRV residuals for two
-reasons, both fixed here:
+The permutation null is valid because the input is the whitened residual, which is
+close to independent under no change; on the raw residual (lag-1 correlation 0.78 for
+HR) permutation is far too narrow and fired constantly. The statistic is the MMD's
+distance above its permutation null in null standard deviations; its threshold is
+calibrated on no-change noise from the patient's own data.
 
-1. Circadian heteroscedasticity leaks into the residual — its volatility is
-   higher at night than midday — so a raw MMD test flags normal day↔night
-   variance transitions as "distribution shifts". FIX: STUDENTIZE the residual by
-   a causal slow rolling std before the test, so KCPD only sees departures
-   *beyond* the patient's normal time-varying volatility envelope.
-
-2. Statistical significance ≠ clinical relevance: with 36-point windows even tiny
-   differences are "significant", and testing one window per step is a massive
-   multiple-comparisons problem. FIX: fire on an EFFECT-SIZE gate — the MMD must
-   sit MIN_EFFECT_Z null-standard-deviations above its own permutation null
-   (a multiplicity-robust criterion that does not depend on the discrete p-floor).
-
-Also: the anomaly is marked at the single event point (the present sample), not
-held forward over the stride, so the per-row count equals the number of detected
-events (no 3× inflation). The magnitude/severity are still carried forward for
-feature continuity.
-
-Fires KCPD_Distribution_Shift; magnitude = the MMD² distance.
-
-NOTE on KCP_Multivariate_Shift: that phenotype is reserved for the multi-channel
-extension (a joint MMD over HRV + SpO2 + steps/sleep). On the single residual
-channel of the present detection phase it is not applicable, so KCPD emits only
-KCPD_Distribution_Shift here; the multivariate variant activates when additional
-physiological channels are fused into the residual vector.
+The score is set at the present point of each evaluation and held until the next one,
+so a shift that stays above threshold across evaluations is one event. Causal: an
+evaluation at time T uses readings up to T.
 """
 
 import numpy as np
 
-# The knobs, tuned on HRV at its 10-min cadence. `window`, `stride` and `stud_halflife`
-# are in SAMPLES, so a faster channel needs its own — `config.CPD_SETTINGS` overrides
-# these per channel.
 DEFAULTS = {
-    "window": 18,             # 3 hours of 10-min samples per side
-    "n_perm": 80,             # permutations to build the MMD null (mean/std)
-    "stride": 3,              # evaluate every `stride` points (magnitude held forward)
-    "min_effect_z": 10.0,     # fire only if MMD >= this many null-std above null mean
-    "studentize": True,       # divide residual by a causal rolling std first
-    "stud_halflife": 36,      # ~6 h half-life for the rolling-std envelope
+    "half_min": 180.0,         # each window's length (3 h)
+    "stride_min": 30.0,        # evaluate every 30 min
+    "coverage": 0.7,           # share of a half's expected readings it must hold
+    "bin_min": 0.0,            # >0: median-bin the readings first (HR: 5)
+    "n_perm": 80,              # permutations for the null mean/sd
 }
+THRESHOLDS = {"shift": 10.0}   # fallback without calibration
 PHENOTYPE = "KCPD_Distribution_Shift"
-RNG_SEED = 0                 # re-seeded PER detect() call — see below
-# NOTE: a module-level RNG made results depend on how many chunks/patients/methods
-# had already been processed in the same interpreter (the permutation stream kept
-# advancing), so annotating one patient alone disagreed with that same patient
-# inside a cohort run. The generator is now created inside detect(), making every
-# call order-independent and per-patient reproducible.
+RNG_SEED = 0                   # re-seeded per call: order-independent, reproducible
 
 
-def _rbf_gram(x, gamma):
-    d2 = (x[:, None] - x[None, :]) ** 2
-    return np.exp(-gamma * d2)
+def _mmd2(K, n):
+    """Unbiased MMD² for the split [first n | rest m] of a Gram matrix K."""
+    m = K.shape[0] - n
+    Kxx, Kyy, Kxy = K[:n, :n], K[n:, n:], K[:n, n:]
+    return ((Kxx.sum() - np.trace(Kxx)) / (n * (n - 1))
+            + (Kyy.sum() - np.trace(Kyy)) / (m * (m - 1)) - 2.0 * Kxy.mean())
 
 
-def _mmd2_from_K(K, n):
-    """Unbiased MMD² for the split [first n | rest n] given full Gram matrix K."""
-    Kxx = K[:n, :n]; Kyy = K[n:, n:]; Kxy = K[:n, n:]
-    m = n
-    sxx = (Kxx.sum() - np.trace(Kxx)) / (m * (m - 1))
-    syy = (Kyy.sum() - np.trace(Kyy)) / (m * (m - 1))
-    sxy = Kxy.sum() / (m * m)
-    return sxx + syy - 2.0 * sxy
+def _bins(t, z, chunk, bin_min):
+    """-> (time, value, chunk, index of the last reading in the bin), observed only."""
+    ok = np.flatnonzero(np.isfinite(z))
+    if bin_min <= 0:
+        return t[ok], z[ok], chunk[ok], ok
+    key = np.floor(t[ok] / bin_min)
+    edges = np.flatnonzero((np.diff(key) != 0) | (np.diff(chunk[ok]) != 0)) + 1
+    groups = np.split(np.arange(ok.size), edges)
+    last = np.array([ok[g[-1]] for g in groups])
+    return (t[last], np.array([np.median(z[ok[g]]) for g in groups]), chunk[last], last)
 
 
-def _studentize(values, halflife):
-    """Causal rolling-std normalization: removes the circadian volatility envelope."""
-    alpha = 1.0 - 0.5 ** (1.0 / halflife)
-    var = None
-    s = np.empty_like(values)
-    for t in range(values.shape[0]):
-        v2 = values[t] ** 2
-        var = v2 if var is None else alpha * v2 + (1.0 - alpha) * var
-        s[t] = np.sqrt(var)
-    s = np.maximum(s, np.median(s[s > 0]) * 1e-3 if np.any(s > 0) else 1e-6)
-    return values / s
+def score(time, values, priors=None, **params):
+    p = {**DEFAULTS, **params}
+    pr = priors or {}
+    t, z = np.asarray(time, float), np.asarray(values, float)
+    n = len(z)
+    chunk = np.asarray(pr.get("chunk", np.zeros(n, int)))
+    step = float(pr.get("step_min") or (np.median(np.diff(t)) if n > 1 else 1.0))
+    eff = max(step, p["bin_min"])
+    need = max(p["coverage"] * p["half_min"] / eff, 3)
+    w = p["half_min"]
+    bt, bz, bc, bidx = _bins(t, z, chunk, p["bin_min"])
+    out = np.full(n, np.nan)
+    if bt.size < 6:
+        return {"shift": out}
+    # first time of each chunk, to keep both halves inside one chunk
+    chunk_start = {c: bt[bc == c][0] for c in np.unique(bc)}
+    rng = np.random.default_rng(RNG_SEED)
+    grid = np.arange(bt[0] + 2 * w, bt[-1] + 1e-9, p["stride_min"])
+    last_i, last_val = None, np.nan
+    for T in grid:
+        j = np.searchsorted(bt, T, side="right") - 1       # the present point
+        if j < 0:
+            continue
+        c = bc[j]
+        if chunk_start[c] > T - 2 * w:
+            val = np.nan
+        else:
+            past = (bt > T - 2 * w) & (bt <= T - w)
+            pres = (bt > T - w) & (bt <= T)
+            nx, ny = int(past.sum()), int(pres.sum())
+            if nx < need or ny < need:
+                val = np.nan
+            else:
+                block = np.r_[bz[past], bz[pres]]
+                d = np.abs(block[:, None] - block[None, :])
+                med = np.median(d[d > 0]) if np.any(d > 0) else 1.0
+                K = np.exp(-d ** 2 / (2.0 * med ** 2 + 1e-12))
+                obs = _mmd2(K, nx)
+                idx = np.arange(nx + ny)
+                null = np.empty(int(p["n_perm"]))
+                for r in range(null.size):
+                    q = rng.permutation(idx)
+                    null[r] = _mmd2(K[np.ix_(q, q)], nx)
+                val = (obs - null.mean()) / (null.std() + 1e-12)
+        i = int(bidx[j])
+        if last_i is not None and i > last_i:
+            out[last_i:i] = last_val                       # hold until this evaluation
+        last_i, last_val = i, val
+    if last_i is not None:
+        out[last_i:] = last_val
+    out[~np.isfinite(z)] = np.nan
+    return {"shift": out}
 
 
 def detect(time, values, priors=None, **params):
-    """Online studentized two-window MMD on the residual. Returns the rich dict."""
-    p = {**DEFAULTS, **params}
-    N_PERM, STRIDE, MIN_EFFECT_Z = p["n_perm"], p["stride"], p["min_effect_z"]
-    N = len(values)
-    out = {"anomaly": np.zeros(N, int),
-           "phenotype": np.full(N, "normal", dtype=object),
-           "magnitude": np.zeros(N), "severity": np.zeros(N)}
-    w = p["window"]
-    if N < 2 * w:
+    n = len(values)
+    out = {"anomaly": np.zeros(n, int),
+           "phenotype": np.full(n, "normal", dtype=object),
+           "magnitude": np.zeros(n), "severity": np.zeros(n)}
+    if n < 2:
         return out
-
-    sig = _studentize(values, p["stud_halflife"]) if p["studentize"] else values
-    idx2 = np.arange(2 * w)
-    rng = np.random.default_rng(RNG_SEED)      # fresh per call -> order-independent
-
-    for t in range(2 * w, N + 1, STRIDE):
-        block = sig[t - 2 * w:t]                          # past w | present w
-        dists = np.abs(block[:, None] - block[None, :])
-        med = np.median(dists[dists > 0]) if np.any(dists > 0) else 1.0
-        gamma = 1.0 / (2.0 * med ** 2 + 1e-12)
-        K = _rbf_gram(block, gamma)
-        obs = _mmd2_from_K(K, w)
-
-        null = np.empty(N_PERM)
-        for j in range(N_PERM):
-            perm = rng.permutation(idx2)
-            null[j] = _mmd2_from_K(K[np.ix_(perm, perm)], w)
-        null_mean = null.mean(); null_std = null.std() + 1e-12
-        z = (obs - null_mean) / null_std                  # effect size vs the null
-
-        i = t - 1                                          # the present point
-        hold = slice(i, min(i + STRIDE, N))               # carry magnitude forward
-        out["magnitude"][hold] = max(obs, 0.0)
-        out["severity"][hold] = min(max(z / (2.0 * MIN_EFFECT_Z), 0.0), 1.0)
-        if z >= MIN_EFFECT_Z:                             # effect-size gate (multiplicity-robust)
-            out["anomaly"][i] = 1                          # mark the EVENT point only
-            out["phenotype"][i] = PHENOTYPE
+    s = np.nan_to_num(score(time, values, priors, **params)["shift"], nan=0.0)
+    th = {**THRESHOLDS, **(priors or {}).get("thresholds", {})}["shift"]
+    hit = s >= th
+    out["anomaly"] = hit.astype(int)
+    out["phenotype"] = np.where(hit, PHENOTYPE, "normal").astype(object)
+    out["magnitude"] = np.maximum(s, 0.0)
+    out["severity"] = np.clip(s / (2.0 * th), 0.0, 1.0)
     return out
 
 
