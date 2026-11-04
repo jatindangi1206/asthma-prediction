@@ -1,0 +1,250 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{amsmath,booktabs,tabularx,array}
+\usepackage[hidelinks]{hyperref}
+\newcommand{\code}[1]{\texttt{\detokenize{#1}}}
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0.6em}
+
+\title{Wearable Pipeline: Data, Training, Inference and Overlap}
+\author{}
+\date{Code-reading notes: 4 November 2026}
+
+\begin{document}
+\maketitle
+
+This describes the current implementation, rather than assuming every statement in
+the older documentation remains current. No project code or tests were run for this
+review. The concerns below come from static inspection and have not been reproduced
+in a fresh experiment.
+
+\section{The main distinction}
+
+The pipeline has two kinds of learning: estimating each patient's signal behaviour,
+and training a classifier to recognise exacerbations. They happen at different stages.
+
+\begin{center}
+Raw recordings and clinical labels\\
+$\downarrow$\\
+Separate channel files and a daily label table\\
+$\downarrow$\\
+Raw / smoothing / frozen forecasting / frozen encoding\\
+$\downarrow$\\
+Optional change-point detection\\
+$\downarrow$\\
+Daily features and history windows\\
+$\downarrow$\\
+Patient-level train/test split\\
+$\downarrow$\\
+Supervised classifier $\longrightarrow$ held-out probabilities and evaluation
+\end{center}
+
+The signal-processing routes are alternative experimental branches. They do not all
+have to run consecutively.
+
+\section{Raw data to channel files and labels}
+
+The default source reads \code{data/raw/pass1/patients.csv}, selects patients marked
+\code{in_models}, and loads their minute-level recordings.
+
+\begin{itemize}
+\item Clinical labels are collapsed to one row per patient-day before filtering
+wearable readings. The labels already exist in the export; this repository reads them.
+\item HRV, heart rate, temperature, steps, sleep and activity channels are extracted
+separately. Each channel retains its own observation times.
+\item Long gaps receive NaN filler rows. These mark missingness without inventing
+readings. Filtering chunks are defined from actual observations, with a gap of at
+least 180 minutes opening a new chunk.
+\end{itemize}
+
+Nothing is trained here. Output is one processed file per patient-channel and a
+separate daily ground-truth table, \code{data/processed/labels_pass1.csv}.
+
+\textbf{Code:} \code{wearable/sources.py}; \code{wearable/steps/ingest.py};
+\code{wearable/chunking.py}.
+
+\section{What each signal-processing route learns}
+
+\begin{tabularx}{\textwidth}{@{}p{0.20\textwidth}YY@{}}
+\toprule
+Route & What is fitted or trained? & Output \\
+\midrule
+Raw & Nothing. & Original readings. \\
+Smoothing & Patient-specific parameters and evolving filter states; no clinical
+labels. & Baseline and residual: raw minus baseline. \\
+Frozen forecasting & Timestral, TimesFM or Chronos pretrained weights remain frozen.
+& Predicted readings, forecast error (surprise), and distribution position (tail). \\
+Frozen encoding & MOMENT or Mantis pretrained weights remain frozen. Each input
+window is normalised separately. & One representation vector per patient-day. \\
+\bottomrule
+\end{tabularx}
+
+\textbf{The frozen forecasters predict physiological readings, not exacerbations.}
+Their outputs become features for a separate clinical classifier. Forecasting uses
+preceding observations to predict blocks ahead. Encoding instead reads a window
+including the day being classified and summarises it as a vector.
+
+The experiment normally processes HRV and HR separately. Other available channels
+join later as raw features. Chronos is currently used as a univariate forecaster;
+its possible cross-channel covariate route is not implemented.
+
+\textbf{Code:} \code{wearable/experiment.py} (\code{inputs});
+\code{wearable/steps/smooth.py}; \code{wearable/steps/forecast.py};
+\code{wearable/steps/encode.py}.
+
+\section{Optional change-point detection}
+
+Change-point detection (CPD) can read raw values, smoothed values, smoothing residuals,
+forecast surprise, or forecast tail. For each patient and channel it:
+
+\begin{enumerate}
+\item Estimates an hour-of-day and behavioural-state baseline from prior readings.
+\item Converts deviations into standardised innovations using a noise model.
+\item Calibrates detector thresholds using synthetic no-change histories built from
+that patient's past.
+\item Applies BOCPD, KCPD, Kalman, HMM and nightly drift detection.
+\item Combines detector alarms using OR.
+\end{enumerate}
+
+This is patient-specific, unsupervised adaptation, including on test patients' own
+histories. It does not use exacerbation labels. Default calibration shuffles historical
+days; optional STS calibration fits a generative time-series model to past readings.
+The noise model refits from trailing history, and alarm thresholds are recalibrated
+periodically.
+
+The output contains flags, magnitudes, noise statistics and gap-reentry information.
+It is not a probability of exacerbation. Causal detector processing also cannot undo
+future leakage already introduced by its input smoother.
+
+\textbf{Code:} \code{wearable/steps/detect.py}; \code{wearable/cpd/_whiten.py};
+\code{wearable/cpd/_sts.py}.
+
+\section{Readings to classifier examples}
+
+The \code{join} step builds one example per patient-day:
+
+\begin{itemize}
+\item Continuous readings become daily mean, standard deviation, minimum and maximum.
+\item State/activity and alarm columns contribute totals and bout counts.
+\item Optional profiles preserve time-of-day bins instead of only daily summaries.
+\item A seven-day input window attaches day $D$ and days $D-1$ through $D-6$.
+Missing calendar days remain missing; older days do not shift into their places.
+\item Embeddings already represent the requested window, so they are not lagged again.
+\item Clinical labels are attached by patient and date. Identifiers, clinical labels,
+event IDs and cohort group are excluded from classifier features.
+\end{itemize}
+
+\begin{tabularx}{\textwidth}{@{}p{0.15\textwidth}YY@{}}
+\toprule
+Task & Available features & Target \\
+\midrule
+Detection & Through day $D$, including $D$. & Is $D$ an exacerbation day? \\
+Onset & Through day $D$, including $D$. & Does a new episode start within the next
+$H$ days? \\
+\bottomrule
+\end{tabularx}
+
+The tasks produce separate datasets and results. The default onset horizon is three
+days; it can be narrowed to one or two while retaining the same eligible days.
+
+\textbf{These are full-day predictions.} Using all readings from $D$ supports a
+decision after those readings are available. It does not establish an alert available
+at the beginning of $D$.
+
+The default eligibility rule retains the study's HRV-based sample days even when
+other channels are included as features. An optional wider validity rule exists;
+changing eligibility changes the population and needs separate review.
+
+\textbf{Code:} \code{wearable/steps/join.py}; \code{wearable/windowing.py}.
+
+\section{Supervised training and held-out inference}
+
+Patients are split 80:20 by default, stratified by cohort and whether they have an
+exacerbation. All days of a patient stay on one side. Five seeds repeat the experiment.
+Within a comparison, input methods use the same split.
+
+The final model receives training features and training labels:
+
+\begin{itemize}
+\item \textbf{XGBoost}, the default, learns boosted trees; CatBoost is another tree
+classifier. Both handle class imbalance during training.
+\item \textbf{RNN/LSTM} learn sequences of daily feature vectors. Feature scales are
+estimated from training data and reused for test inference.
+\item \textbf{Mantis classifier} uses pretrained Mantis and trains it for the clinical
+task. The default requests full fine-tuning, but when a channel adapter is required,
+the implementation switches to adapter/head training.
+\item \textbf{Always-no} is the reference that never flags a day.
+\end{itemize}
+
+The fitted model then predicts $P(y=1)$ for held-out patients. It does not receive
+their clinical labels during prediction. Evaluation subsequently compares probabilities
+with those labels, computes metrics, resamples test patients for confidence intervals,
+and writes probability-band calibration tables.
+
+\textbf{The calibration table assesses probabilities; it does not recalibrate them.}
+It is also distinct from the unsupervised alarm-threshold calibration in CPD.
+
+The model step saves predictions and provenance, not a fitted classifier checkpoint.
+It is currently an experiment workflow rather than a separate saved-model deployment
+flow. The artifact store caches results so the same signal-processing outputs can be
+reused across tasks, models and folds.
+
+\textbf{Code:} \code{wearable/steps/model.py}; \code{wearable/models/};
+\code{wearable/steps/evaluate.py}; \code{wearable/store.py}.
+
+\section{Where the data and features overlap}
+
+\begin{enumerate}
+\item \textbf{Adjacent days.} Seven-day windows overlap by six days within a patient.
+This is expected. Patient-level splitting prevents these windows from crossing
+train/test within a run.
+\item \textbf{Different seeds.} A patient may train in one run and test in another.
+These are repeated holdouts, not five independent cohorts.
+\item \textbf{Different branches.} A smoothed artifact carries raw values, baseline
+and residual. A residual-plus-CPD route passes the smoothing block and detector
+features. An embedding route adds embeddings beside ordinary raw features.
+Therefore these comparisons concern feature bundles, not isolated representations.
+\item \textbf{Before the split.} Signal processing runs before the patient split and
+is reused across folds. Frozen inference and adaptation using a test patient's
+available past can be legitimate. Using that patient's future is not causal.
+\item \textbf{Signal-only smoothing studies.} The separate smoothing-study script
+can derive settings from entire cohorts. If those settings are later used for a
+held-out predictive claim, their derivation must also respect the training boundary;
+being label-free alone does not establish an untouched test set.
+\end{enumerate}
+
+\section{Concrete concerns to discuss before corrections}
+
+\subsection{Future-dependent smoother calibration}
+Nine of the ten smoothers estimate patient-specific parameters from the full supplied
+recording. Later observations can therefore change earlier features. Patient-level
+splitting does not fix this within-patient lookahead. The documented truncation-exact
+exception is \code{anrewma}; this review did not rerun that check.
+
+For example, \code{gammadglm} fits its patient calibration before filtering individual
+chunks. A forward filtering loop does not make the whole operation causal when its
+parameters were estimated using future readings.
+
+\subsection{CPD channel bookkeeping}
+Detect artifacts do not record \code{stats.signal}, but \code{join._features} uses
+that field to decide which raw channel an artifact already covers. The fallback is
+HRV. An HR detector can therefore be treated as covering HRV, changing which raw
+feature blocks are included. This needs correction or explicit verification before
+assuming the intended variables reach every path.
+
+\subsection{Flag counts labelled as minutes}
+Daily aggregation sums flagged rows into columns ending in \code{_minutes}. For
+irregular HRV readings, a flagged-row count is not elapsed time. The feature should
+either be named as a count or computed using an explicit duration rule.
+
+\section{Scope of these notes}
+
+These notes explain the implemented flow and identify specific points for discussion.
+They do not certify causality, vendor-model behaviour, clinical performance, or existing
+cached results. No changes to pipeline code were made, and no experiments, tests or
+LaTeX compilation were run for this document.
+
+\end{document}
