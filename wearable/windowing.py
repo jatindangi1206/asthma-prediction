@@ -42,7 +42,9 @@ _PROFILE_RE = re.compile(r"_p(\d+)(?:_d(\d+))?$")
 
 
 def profile_col(t: pd.DataFrame) -> str | None:
-    return next((c for c in PROFILE_COLS if c in t.columns), None)
+    # a smoother's table carries the raw reading beside its estimate; profile the estimate
+    smoothed = [c for c in t.columns if str(c).startswith("smoothed_")]
+    return smoothed[0] if smoothed else next((c for c in PROFILE_COLS if c in t.columns), None)
 
 
 def day_profile(t: pd.DataFrame, prefix: str, bins: int,

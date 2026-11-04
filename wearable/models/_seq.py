@@ -107,6 +107,8 @@ def fit(X, y, cell: str, seed: int = 42, **params):
         raise ValueError("no exacerbation day among the training days")
 
     torch.manual_seed(seed)
+    # a 64-wide net gains nothing from 40 threads; with parallel sweeps they thrash (3 s -> 20 min)
+    torch.set_num_threads(min(4, torch.get_num_threads()))
     net = Net(x.shape[-1], cell, p["hidden"], p["layers"], p["dropout"])
     opt = torch.optim.Adam(net.parameters(), lr=p["lr"])
     loss_fn = torch.nn.BCEWithLogitsLoss()

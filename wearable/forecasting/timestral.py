@@ -73,9 +73,10 @@ def forecast(contexts, horizon, config=None, levels=LEVELS):
     out = _model(cfg).forecast(np.asarray(contexts, dtype=np.float32),
                               prediction_length=int(horizon))
     n, h = len(contexts), int(horizon)
-    median = np.asarray(out.median, dtype=float).reshape(n, h)
+    host = lambda a: np.asarray(a.detach().cpu() if hasattr(a, "detach") else a, dtype=float)
+    median = host(out.median).reshape(n, h)          # tensors come back on the GPU
     try:
-        quant = np.asarray(out.quantiles, dtype=float).reshape(n, h, -1)
+        quant = host(out.quantiles).reshape(n, h, -1)
     except Exception:          # a build without the quantile array: median only
         quant = None
     return median, quant

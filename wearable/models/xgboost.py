@@ -28,7 +28,8 @@ def fit(X, y, seed: int = 42, **params):
     p = {**DEFAULTS, **{k: v for k, v in params.items() if k in DEFAULTS}}
     y = np.asarray(y).astype(int)
     pos = int(y.sum())
-    model = XGBClassifier(**p, random_state=seed, eval_metric="logloss",
+    # 8 threads: on a ~12k-row table every core is overhead (40 threads: 56 s, 8: 3 s)
+    model = XGBClassifier(**p, random_state=seed, eval_metric="logloss", n_jobs=8,
                           scale_pos_weight=(len(y) - pos) / max(pos, 1))
     model.fit(np.asarray(X, dtype=float), y)
     return model

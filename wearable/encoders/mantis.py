@@ -51,9 +51,9 @@ DEFAULTS = {
 _MODELS: dict = {}
 
 
-def _model(repo: str, device):
+def _model(repo: str, device, layer: int):
     """Load once per process, at first use — never at import time."""
-    key = (repo, device)
+    key = (repo, device, layer)
     if key not in _MODELS:
         try:
             import torch
@@ -63,7 +63,9 @@ def _model(repo: str, device):
             raise ImportError("the `mantis` package is needed for the mantis encoder: "
                               "pip install mantis-tsfm") from exc
         dev = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        net = MantisV2(device=dev).from_pretrained(repo)
+        # mantis-tsfm 1.1: the layer and output token are set on the network, not per call
+        net = MantisV2(device=dev, return_transf_layer=layer,
+                       output_token="combined").from_pretrained(repo)
         _MODELS[key] = MantisTrainer(device=dev, network=net)
     return _MODELS[key]
 
@@ -71,7 +73,7 @@ def _model(repo: str, device):
 def encode(series, **params):
     """(n, T) window, NaN where unobserved -> (n, d) embeddings."""
     p = {**DEFAULTS, **{k: v for k, v in params.items() if k in DEFAULTS}}
-    model = _model(p["repo"], p["device"])
+    model = _model(p["repo"], p["device"], int(p["layer"]))
 
     x, mask = fit_length(series, CONTEXT, p["mode"])
     x = standardise(x, mask)
@@ -79,7 +81,6 @@ def encode(series, **params):
     for k in range(0, len(x), int(p["batch"])):
         # (batch, channels, time); one channel, as everywhere in this repo
         xb = x[k:k + int(p["batch"])][:, None, :]
-        z = model.transform(xb, return_transf_layer=int(p["layer"]),
-                            output_token="combined")
+        z = model.transform(xb)
         out.append(np.asarray(z, dtype=np.float32).reshape(len(xb), -1))
     return np.concatenate(out) if out else np.zeros((0, 0), dtype=np.float32)
