@@ -590,7 +590,12 @@ patient's recent nights) read the column through a per-patient, per-channel **no
   the achieved no-change rate), and `scripts/cpd_calibration_compare.py` compares them.
   Known limits: AR(2) fits mostly settle on one root, so hours-scale autocorrelation is
   under-modelled (HR at 60 min: 0.43 synthetic against 0.62 real), and STS cannot
-  reproduce the HRV pile-up at 120–129.
+  reproduce the HRV pile-up at 120–129. Round-1 full-cohort result at 1/3: on HRV STS
+  roughly matches shuffle (1.40 vs 1.36 alarms per worn day); on HR it over-fires (5.05 vs
+  1.40), because its synthetic HR is too tame (ν pinned at 3, bursts missed), so shuffle
+  stays the default. Under shuffle, HR's BOCPD threshold mostly sits at its log-odds
+  ceiling (34.5), which nearly switches BOCPD off for HR; this is open.
+  Write-ups: `docs/change_point_detection_round1.md`, `docs/smoothing_round1.md`.
 - **Settings** are in minutes, per channel, in `config.CPD_SETTINGS`. The `detect`
   block holds the noise model's; the others override each detector's `DEFAULTS`. A
   misspelt name raises. Everything is in the detect cache key. `wearable list` prints

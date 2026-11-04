@@ -206,6 +206,15 @@ INPUTS: dict[str, dict] = {
     "smoothed+cpd": {"smooth": True, "detect_on": "smoothed", "forecast": None, "encode": None},
     "residual+cpd": {"smooth": True, "detect_on": "residual", "forecast": None, "encode": None},
 }
+for _s in smoothing.names():  # `smooth` names the smoother; True means the default
+    INPUTS[f"smoothed@{_s}"] = {"smooth": _s, "detect_on": None, "forecast": None, "encode": None}
+    for _e in encoders.names():  # the encoder reads the smoother's output
+        INPUTS[f"smoothed@{_s}+embed@{_e}"] = {"smooth": _s, "detect_on": None,
+                                               "forecast": None, "encode": _e}
+for _e in encoders.names():
+    INPUTS[f"raw+cpd+embed@{_e}"] = {"smooth": False, "detect_on": "raw", "forecast": None, "encode": _e}
+for _f in forecasting.names():
+    INPUTS[f"raw+cpd+forecast@{_f}"] = {"smooth": False, "detect_on": "raw", "forecast": _f, "encode": None}
 for _f in forecasting.names():
     INPUTS[f"forecast@{_f}"] = {"smooth": False, "detect_on": None, "forecast": _f, "encode": None}
     INPUTS[f"surprise+cpd@{_f}"] = {"smooth": False, "detect_on": "surprise", "forecast": _f, "encode": None}
@@ -282,7 +291,7 @@ def inputs(smooth_method: str | None = None, detect_on: str | None = None,
             artifacts.append(encode_step.run(
                 encode_method, signal=signal, days=days,
                 profile=bins_for(days, ceiling) if ceiling else PROFILE_BINS,
-                force=force))
+                input_artifact=sm, force=force))
     return artifacts
 
 
@@ -292,7 +301,8 @@ def variant_inputs(variant: str, smoothing_method: str = DEFAULT_SMOOTHING, **kw
         raise ValueError(f"unknown input variant {variant!r}; "
                          f"available: {sorted(INPUTS)}")
     spec = INPUTS[variant]
-    return inputs(smoothing_method if spec["smooth"] else None,
+    smooth = spec["smooth"]
+    return inputs((smooth if isinstance(smooth, str) else smoothing_method) if smooth else None,
                   spec["detect_on"], forecast_method=spec.get("forecast"),
                   encode_method=spec.get("encode"), **kw)
 
