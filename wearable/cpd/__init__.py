@@ -5,17 +5,20 @@ Contract — a module here is a CPD method if it exposes:
     detect(time, values, priors, **settings) -> {"anomaly", "phenotype", "magnitude", "severity"}
         per-row arrays over ONE patient's observed readings, time-sorted.
         time    minutes since the patient's first reading (clock time, gaps included)
-        values  the whitened residual z from `_whiten.noise_model` (NaN before arming)
+        values  whitened z (NaN before arming); nightly drift instead reads full raw support
         priors  {"thresholds": {stream: value}, "chunk": H8 ids, "stamp": datetime64,
                  "raw": the channel's own value, "step_min": nominal cadence,
                  "nu": the Student-t tail of the patient's whitened values,
+                 "tail_scale": the fitted Student-t scale (scalar or aligned array),
                  "armed": where an alarm can be reported (burn-in and settle are not)}
         settings  the method's DEFAULTS, overridden per channel by config.CPD_SETTINGS
 
-and optionally declares `LABEL`, `DEFAULTS`, `PHENOTYPES`, and for calibration either
+The calibrated step requires `THRESHOLDS` naming its streams and either
 `score(time, values, priors, **settings) -> {stream: per-row statistic}` (thresholds are
 then set on simulated no-change noise) or `threshold_for(rate, **settings)` (an analytic
-threshold). There is no list to edit — see `wearable/registry.py`. A module starting
+threshold). `LABEL`, `DEFAULTS`, `PHENOTYPES` remain optional. Adapters may also return
+`scores` and an aligned `available` mask; unavailable published flags remain missing,
+not negative evidence. There is no list to edit — see `wearable/registry.py`. A module starting
 with `_` is a helper (`_whiten`), never a method.
 
 Detection runs on whichever column the detect step is pointed at — raw, smoothed,

@@ -37,6 +37,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 from scipy.stats import t as student_t
+from wearable.config import GAP_THRESHOLD_MIN
+from wearable.cpd._contracts import positive, series
 
 # Step-level settings (the `detect` block of config.CPD_SETTINGS overrides them per
 # channel). Everything about time is in minutes.
@@ -52,6 +54,7 @@ DEFAULTS = {
     "recal_days": 7.0,         # thresholds are recalibrated this often, on trailing days
     "bin_min": 0.0,            # >0: median-bin the readings first (HR: 5)
     "state_window_min": 1.0,   # minutes a reading summarises, for its sleep/activity state
+    "max_null_occupancy": 0.1, # candidate per-stream guard, dimensionless; not a clinical target
 }
 _HOUR_N0 = 20                  # pseudo-count shrinking an hour's centre/scale to the day's
 _STATE_N0 = 50                 # pseudo-count shrinking a state's offset/ratio to none
@@ -136,7 +139,7 @@ def _ou_fit(t, u, chunk, step):
 def _filter(idx, t, u, chunk, a, tau, state=(0.0, None, None)):
     """Innovations of u (aligned with the global indices `idx`) under OU(a, tau) plus
     white(1-a), with a Huber-robust update. `state` = (x, P, previous global index)
-    carries across refits."""
+    may be initialized by replay under the current fit."""
     e = max(1.0 - a, 1e-2)
     x, P, prev = state
     P = a if P is None else P
@@ -173,7 +176,52 @@ def settle_mask(t, chunk, cfg):
     return out
 
 
-def noise_model(stamp, t, r, raw, chunk, cfg, state=None):
+def noise_model(stamp, t, r, raw, chunk, cfg, state=None, exposure=None):
+    """Past-only fits; restart burn-in after history ages beyond baseline_days.
+
+    Exposure is observed-support minutes, not the duration of gaps between samples.
+    Each epoch has independent calibration and filter state.
+    """
+    t, r, chunk = series(t, r, {"chunk": chunk})
+    stamp, raw = np.asarray(stamp, "datetime64[ns]"), np.asarray(raw, float)
+    n = len(r)
+    if stamp.shape != r.shape or raw.shape != r.shape:
+        raise ValueError("noise-model timestamps/raw must align with the selected series")
+    exposure = (np.full(n, cfg["step_min"], float) if exposure is None
+                else np.asarray(exposure, float))
+    if exposure.shape != r.shape or not np.isfinite(exposure).all() or np.any(exposure <= 0):
+        raise ValueError("noise-model exposure must be aligned, finite and positive")
+    edges = np.r_[0, np.flatnonzero(np.diff(t) >= cfg["baseline_days"] * 1440) + 1, n]
+    result = None
+    fits, abnormal, arms = [], set(), []
+    for lo, hi in zip(edges[:-1], edges[1:]):
+        if hi == lo:
+            continue
+        out = _noise_epoch(stamp[lo:hi], t[lo:hi], r[lo:hi], raw[lo:hi],
+                           chunk[lo:hi], cfg, None if state is None else state[lo:hi],
+                           exposure[lo:hi])
+        if result is None:
+            result = {k: np.full(n, np.nan) for k in
+                      ("z", "scale", "reentry_jump_z", "reentry_gap_min", "tail_nu", "tail_scale")}
+            result.update(armed=np.zeros(n, bool), settle=np.zeros(n, bool))
+        for k in result:
+            result[k][lo:hi] = out[k]
+        if out["arm"] is not None:
+            arms.append(lo + out["arm"])
+        fits.extend(out["fits"])
+        abnormal.update(out["abnormal"])
+    if result is None:
+        result = {k: np.empty(0) for k in
+                  ("z", "scale", "reentry_jump_z", "reentry_gap_min", "tail_nu", "tail_scale")}
+        result.update(armed=np.zeros(0, bool), settle=np.zeros(0, bool))
+    initial_tail = result["tail_nu"][np.isfinite(result["tail_nu"])]
+    result.update(arm=arms[0] if arms else None, arms=arms, fits=fits,
+                  abnormal=abnormal, nu=float(initial_tail[0]) if initial_tail.size else 200.0,
+                  exposure=exposure)
+    return result
+
+
+def _noise_epoch(stamp, t, r, raw, chunk, cfg, state, exposure):
     """All inputs are the patient's OBSERVED readings, time-sorted.
 
     stamp: datetime64[ns] (local clock), t: minutes since the first reading,
@@ -186,11 +234,12 @@ def noise_model(stamp, t, r, raw, chunk, cfg, state=None):
     hour = ((stamp.astype("datetime64[h]") - stamp.astype("datetime64[D]"))
             .astype(int)).astype(int)
     day = stamp.astype("datetime64[D]")
-    worn = (np.arange(n) + 1) * step
+    worn = np.cumsum(exposure)
     out = {"z": np.full(n, np.nan), "scale": np.full(n, np.nan),
            "armed": np.zeros(n, bool), "settle": settle_mask(t, chunk, cfg),
            "reentry_jump_z": np.full(n, np.nan), "reentry_gap_min": np.full(n, np.nan),
-           "arm": None}
+           "arm": None, "fits": [], "abnormal": set(),
+           "tail_nu": np.full(n, np.nan), "tail_scale": np.full(n, np.nan)}
     reached = np.flatnonzero(worn >= cfg["burn_in_min"])
     if reached.size == 0 or reached[0] + 1 >= n:
         return out
@@ -200,7 +249,6 @@ def noise_model(stamp, t, r, raw, chunk, cfg, state=None):
     new_day = np.flatnonzero(day[1:] != day[:-1]) + 1
     refits = [arm] + [int(i) for i in new_day if i > arm]
     abnormal = set()
-    kf = (0.0, None, None)                 # the filter runs on, unbroken, across refits
     raw_scale = np.full(n, np.nan)
     for k, a0 in enumerate(refits):
         b0 = refits[k + 1] if k + 1 < len(refits) else n
@@ -209,30 +257,41 @@ def noise_model(stamp, t, r, raw, chunk, cfg, state=None):
         if abnormal:
             base = base[~np.isin(day[base], list(abnormal))]
         if base.size < 10:
-            base = np.arange(lo, a0)
+            out["fits"].append({"from": stamp[a0], "status": "insufficient_healthy_history"})
+            continue
         c, s = _hourly(r[base], hour[base])
         u_h = (r[base] - c[hour[base]]) / s[hour[base]]
         off, ratio = _by_state(u_h, state[base])
         u_base = (u_h - off[state[base]]) / ratio[state[base]]
         a, tau = _ou_fit(t[base], u_base, chunk[base], step)
-        if k == 0:
-            # the first worn day whitened with its own fit: its tail weight (nu) is
-            # what the HMM's emissions use
-            z_pool, _ = _filter(base, t, u_base, chunk, a, tau)
-            pool = z_pool[np.isfinite(z_pool)]
-            nu_ = student_t.fit(pool, floc=0.0)[0] if pool.size > 30 else 200.0
-            out["nu"] = float(np.clip(nu_, 2.5, 200.0))
+        # Replay past observations in the NEW coordinates instead of carrying x/P
+        # from an incompatible normalization. No future rows enter the replay.
+        z_pool, kf = _filter(base, t, u_base, chunk, a, tau)
+        pool = z_pool[np.isfinite(z_pool)]
+        nu_, tail_scale = 200.0, 1.0
+        if pool.size > 30 and np.std(pool) > 1e-8:
+            try:
+                fitted = student_t.fit(pool, floc=0.0)
+                if np.isfinite(fitted).all() and fitted[2] > 1e-8:
+                    nu_, tail_scale = float(np.clip(fitted[0], 2.5, 200.0)), float(fitted[2])
+            except (ValueError, RuntimeError, FloatingPointError):
+                pass   # declared conservative Gaussian-like tail fallback
         seg = np.arange(a0, b0)
         u = ((r[seg] - c[hour[seg]]) / s[hour[seg]] - off[state[seg]]) / ratio[state[seg]]
         z, kf = _filter(seg, t, u, chunk, a, tau, kf)
         out["z"][seg], out["scale"][seg] = z, s[hour[seg]] * ratio[state[seg]]
+        out["tail_nu"][seg], out["tail_scale"][seg] = nu_, tail_scale
+        out["fits"].append({"from": stamp[a0], "status": "fitted", "n_history": len(base),
+                            "hour_center": c.tolist(), "hour_scale": s.tolist(),
+                            "state_offset": off.tolist(), "state_ratio": ratio.tolist(),
+                            "ou_a": a, "ou_tau": tau, "tail_nu": nu_, "tail_scale": tail_scale})
         raw_scale[seg] = _robust(raw[base])[1]
         for d in np.unique(day[seg]):
             m = day[seg] == d
             zz = z[m][np.isfinite(z[m])]
             if zz.size and np.mean(np.abs(zz) > _Z_ABN) > cfg["abnormal_frac"]:
                 abnormal.add(d)
-    out["armed"] = (np.arange(n) >= arm) & ~out["settle"]
+    out["armed"] = (np.arange(n) >= arm) & ~out["settle"] & np.isfinite(out["z"])
     out["abnormal"] = abnormal
     _reentry(t, raw, chunk, raw_scale, out, cfg)
     return out
@@ -288,32 +347,46 @@ def events(flag):
     return int(np.sum(f & ~np.r_[False, f[:-1]]))
 
 
-def bins(stamp, t, r, raw, chunk, bin_min, state=None):
+def bins(stamp, t, r, raw, chunk, bin_min, state=None, reading_min=1.0):
     """Median-bin the readings into `bin_min`-minute bins that never cross a chunk.
 
-    Returns the binned series (stamp and time of each bin's LAST reading, the medians,
+    Returns the binned series (stamp and time of each closed bin's boundary, the medians,
     the chunk) and, for every reading, the bin whose output it holds: the latest bin
-    whose last reading is at or before it (-1 before the first bin closes). Holding a
-    closed bin's output forward keeps everything causal.
+    whose close is at or before it (-1 before the first bin closes). Open terminal
+    bins are omitted. Callers must also enforce chunk, settling and expiry masks.
 
     For HR this matters more than speed: its readings are correlated over ~9 min, so
     5-minute medians lose little information, and they absorb the 1–5-minute surges
     (posture, movement) that otherwise dominate the residual's tails."""
+    positive(bin_min=bin_min, reading_min=reading_min)
+    if not len(t):
+        return {"stamp": stamp, "t": t, "r": r, "raw": raw, "chunk": chunk,
+                "last": np.empty(0, int), "holder": np.empty(0, int),
+                "state": np.empty(0, int), "exposure": np.empty(0)}
     key = np.floor(t / bin_min)
     edge = np.r_[True, (key[1:] != key[:-1]) | (chunk[1:] != chunk[:-1])]
     gid = np.cumsum(edge) - 1
     last = np.r_[np.flatnonzero(edge)[1:] - 1, len(t) - 1]
     med = lambda v: pd.Series(v).groupby(gid).median().to_numpy()
-    holder = np.searchsorted(last, np.arange(len(t)), side="right") - 1
+    close = (key[last] + 1) * bin_min
+    closed = close <= t[-1]             # never publish an open terminal bin
+    ends = np.flatnonzero(closed)
+    close = close[closed]
+    publish = np.searchsorted(t, close, side="left")
+    holder = np.searchsorted(close, t, side="right") - 1
     st = np.zeros(len(last), int)
     if state is not None:                         # the bin's majority state
         st = (pd.Series(np.asarray(state, int)).groupby(gid)
               .agg(lambda x: x.value_counts().idxmax()).to_numpy())
-    return {"stamp": stamp[last], "t": t[last], "r": med(r), "raw": med(raw),
-            "chunk": chunk[last], "last": last, "holder": holder, "state": st}
+    sizes = np.bincount(gid)
+    return {"stamp": stamp[0] + (close * 60e9).astype("timedelta64[ns]"),
+            "t": close, "r": med(r)[ends], "raw": med(raw)[ends],
+            "chunk": chunk[last][ends], "last": publish, "holder": holder,
+            "state": st[ends], "exposure": np.minimum(sizes[ends] * reading_min, bin_min)}
 
 
-def twin(stamp, r, raw, chunk, days, cfg, seed=0, state=None):
+def twin(stamp, r, raw, chunk, days, cfg, seed=0, state=None, cutoff=None,
+         lower=None, exposure=None):
     """A no-change twin of the patient, whitened by this same noise model.
 
     Whole days of the patient's own series (`days`: calendar dates to draw from) are
@@ -321,50 +394,82 @@ def twin(stamp, r, raw, chunk, days, cfg, seed=0, state=None):
     its own clock times and behavioural states, out to `null_days` worn days (plus a
     burn-in day for the twin's own noise model). Within a day everything is real:
     bursts, tails, the day/night pattern, sleep and activity, the gaps. Across days the order is shuffled, so a trend or a lasting change
-    cannot survive. Every resampled day starts a new chunk. The twin's z therefore
+    cannot survive unchanged. Internal chunks are preserved and every resampled day
+    starts a new block. The twin's z therefore
     carries the same estimation effects as the real z, and a threshold set on it means
     the same thing on the real data. Uses only the days it is given: causal."""
     rng = np.random.default_rng(seed)
     dd = stamp.astype("datetime64[D]")
-    pools = [np.flatnonzero(dd == d) for d in days]
+    valid = np.ones(len(stamp), bool)
+    if cutoff is not None:
+        valid &= stamp < cutoff
+    if lower is not None:
+        valid &= stamp >= lower
+    pools = [np.flatnonzero((dd == d) & valid) for d in days]
     pools = [i for i in pools if i.size]
+    if not pools:
+        raise ValueError("no eligible past days for shuffle calibration")
+    exposure = np.full(len(stamp), cfg["step_min"]) if exposure is None else exposure
+    exposure = np.asarray(exposure, float)
+    if exposure.shape != r.shape or not np.isfinite(exposure).all() or np.any(exposure <= 0):
+        raise ValueError("shuffle exposure must be aligned, finite and positive")
+    positive(null_days=cfg["null_days"], burn_in_min=cfg["burn_in_min"])
     step = float(cfg["step_min"])
-    need = (cfg["null_days"] * 1440 + cfg["burn_in_min"]) / step
+    need = cfg["null_days"] * 1440 + cfg["burn_in_min"]
     picks, total = [], 0
     while total < need:
         i = pools[rng.integers(len(pools))]
         picks.append(i)
-        total += i.size
+        total += float(np.sum(exposure[i]))
     start = np.datetime64("2000-01-03")
     st = np.concatenate([start + k * np.timedelta64(1, "D") + (stamp[i] - dd[i])
                          for k, i in enumerate(picks)])
-    ch = np.concatenate([np.full(i.size, k) for k, i in enumerate(picks)])
+    parts, offset = [], 0
+    for i in picks:
+        boundary = np.r_[True, (np.diff(chunk[i]) != 0) |
+                         (np.diff(stamp[i]).astype("timedelta64[s]").astype(float) / 60 >= GAP_THRESHOLD_MIN)]
+        ids = np.cumsum(boundary) + offset
+        parts.append(ids)
+        offset = int(ids[-1])
+    ch = np.concatenate(parts)
     sel = np.concatenate(picks)
     tt = (st - st[0]).astype("timedelta64[s]").astype(float) / 60.0
     tw = noise_model(st, tt, r[sel], raw[sel], ch, cfg,
-                     None if state is None else np.asarray(state)[sel])
-    return tt, tw["z"], ch, tw["armed"], tw["armed"].sum() * step / 1440.0, tw.get("nu", 200.0)
+                     None if state is None else np.asarray(state)[sel], exposure[sel])
+    return tt, tw["z"], ch, tw["armed"], float(exposure[sel][tw["armed"]].sum()) / 1440.0, tw.get("nu", 200.0)
 
 
-def pick_threshold(score, armed, worn_days, rate):
+def pick_threshold(score, armed, worn_days, rate, max_occupancy=DEFAULTS["max_null_occupancy"], time=None, chunk=None):
     """Smallest threshold th such that `score >= th` fires at most `rate` events per worn
-    day — at th and at every higher threshold — counted over armed readings only (a
-    settle window does not split an alarm in two).
+    day — at th and at every higher threshold — on eligible support. Unarmed rows
+    and chunk/gap boundaries terminate events. A per-stream occupancy guard rejects
+    almost-always-on solutions; this is a candidate engineering policy.
 
     Exact, not interpolated: an event starts at every up-crossing, and reading i is an
     up-crossing for exactly the thresholds in (score[i-1], score[i]], so the event count
     at every candidate threshold is two sorted searches. If even the highest threshold
     fires too often for the null's length, return a value just above the null's maximum
     (no events in the null: conservative)."""
-    x = np.nan_to_num(np.asarray(score, float)[np.asarray(armed, bool)], nan=-np.inf)
+    positive(worn_days=worn_days, rate=rate)
+    if not 0 < max_occupancy <= 1:
+        raise ValueError("max_occupancy must be in (0,1]")
+    eligible = np.asarray(armed, bool)
+    x = np.asarray(score, float)
+    x = np.where(eligible & np.isfinite(x), x, -np.inf)
     fin = x[np.isfinite(x)]
     if fin.size == 0:
         return np.inf
     prev = np.r_[-np.inf, x[:-1]]
+    if time is not None and len(x):
+        boundary = np.r_[True, np.diff(time) >= GAP_THRESHOLD_MIN]
+        if chunk is not None:
+            boundary |= np.r_[True, np.diff(chunk) != 0]
+        prev[boundary] = -np.inf
     up = x > prev
     lo, hi = np.sort(prev[up]), np.sort(x[up])
     cand = np.unique(fin)
     E = (len(hi) - np.searchsorted(hi, cand)) - (len(lo) - np.searchsorted(lo, cand))
     worst_above = np.maximum.accumulate(E[::-1])[::-1]
-    good = np.flatnonzero(worst_above <= rate * worn_days)
+    occupancy = (len(np.sort(fin)) - np.searchsorted(np.sort(fin), cand)) / max(eligible.sum(), 1)
+    good = np.flatnonzero((worst_above <= rate * worn_days) & (occupancy <= max_occupancy))
     return float(cand[good[0]]) if good.size else float(np.nextafter(fin.max(), np.inf))

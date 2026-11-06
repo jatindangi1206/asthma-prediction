@@ -129,7 +129,7 @@ def patient_split(patients, seed: int = SEED, test_fraction: float = TEST_FRACTI
 
 
 def _day_features(table: pd.DataFrame, prefix: str,
-                  profile: int = 0) -> pd.DataFrame:
+                  profile: int = 0, cpd_schema: bool = False) -> pd.DataFrame:
     """One row per patient-day. Numeric columns -> mean/std/min/max; `*_anomaly` flags
     -> rows flagged plus distinct events (contiguous runs), which is the honest way to
     count a sustained-regime detector. With `profile` > 0, also that many time-of-day
@@ -139,7 +139,8 @@ def _day_features(table: pd.DataFrame, prefix: str,
     t["date"] = t["createdTime"].dt.normalize()
 
     num = [c for c in t.columns
-           if c not in _SKIP and pd.api.types.is_numeric_dtype(t[c])]
+           if c not in _SKIP and pd.api.types.is_numeric_dtype(t[c])
+           and not (cpd_schema and (c.endswith("_event_start") or "_threshold_" in c or "_score_" in c))]
     # A 0/1 state is counted, not averaged: total minutes in it, and how many separate
     # bouts. The anomaly flags already worked this way, so they share the path.
     flags = [c for c in num if c.endswith("_anomaly") or c == "anomaly_present"
@@ -165,10 +166,16 @@ def _day_features(table: pd.DataFrame, prefix: str,
         out.extend([tot, cnt])
     if flags:
         g = t.sort_values(["p_id", "createdTime"]).groupby(_ID)
-        fl = g[flags].sum()
-        fl.columns = [f"{prefix}_{c}_minutes" for c in fl.columns]
-        ev = g[flags].agg(lambda s: int(((s.to_numpy() == 1) &
-                                        (np.r_[0, s.to_numpy()[:-1]] == 0)).sum()))
+        fl = g[flags].sum(min_count=1) if cpd_schema else g[flags].sum()
+        fl.columns = [f"{prefix}_{c}_{'count' if cpd_schema else 'minutes'}" for c in fl.columns]
+        if cpd_schema:
+            ev = pd.concat([
+                g[f"{c}_event_start"].sum(min_count=1).rename(c)
+                if f"{c}_event_start" in t else g[c].sum(min_count=1).mul(np.nan).rename(c)
+                for c in flags], axis=1)
+        else:
+            ev = g[flags].agg(lambda s: int(((s.to_numpy() == 1) &
+                                            (np.r_[0, s.to_numpy()[:-1]] == 0)).sum()))
         ev.columns = [f"{prefix}_{c}_bouts" for c in flags]
         out.extend([fl, ev])
     n = t.groupby(_ID).size().rename(f"{prefix}_n_rows").to_frame()
@@ -206,7 +213,8 @@ def _features(artifacts, profile: int = 0,
             embedded.append(tbl[[*_ID, *cols]].rename(
                 columns={c: f"{prefix}_{c}" for c in cols}))
             continue
-        parts.append(_day_features(tbl, prefix=prefix, profile=profile))
+        parts.append(_day_features(tbl, prefix=prefix, profile=profile,
+                                   cpd_schema=a.step == "detect" and bool(a.manifest.get("cpd_schema"))))
     # EVERY MODEL GETS EVERY VARIABLE. A path decides what happens to the channel it
     # processes; every other channel still goes in, raw. So the raw blocks are always
     # added — minus the channels an artifact already covers, which would otherwise
@@ -425,7 +433,7 @@ def run(artifacts=(), target: str = "detection", seed: int = SEED,
     if valid != "hrv":
         params = {**params, "valid": valid}
     inputs = [a.ref for a in artifacts]
-    code_hash = "join4"            # this step's own logic version
+    code_hash = "join4" + ("-cpd_candidate_1" if any(a.manifest.get("cpd_schema") for a in artifacts) else "")
 
     if not force:
         hit = store.find(STEP, name, params, inputs, code_hash)

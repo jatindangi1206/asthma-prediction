@@ -1,0 +1,206 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[margin=2.3cm]{geometry}
+\usepackage{longtable,booktabs,amsmath}
+\usepackage[hidelinks]{hyperref}
+\newcommand{\code}[1]{\texttt{\detokenize{#1}}}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0.6em}
+\setlength{\emergencystretch}{3em}
+\title{CPD: Initial Candidate Fixes and Design Decisions}
+\author{}
+\date{7 November 2026}
+\begin{document}
+\maketitle
+
+\section{Status and scope}
+This records an \textbf{initial candidate fix}, not a validated CPD release.
+The issue IDs refer to \code{docs/cpd_issues.tex}; that audit is retained as the
+pre-fix baseline. No Python code, imports, tests, selftests, byte-compilation,
+simulations or data processing were executed for this change, at the user's explicit
+request. Regression test source is provided for later execution. Static syntax and
+source inspection cannot establish numerical correctness or clinical performance.
+
+The implementation scope is the five CPD adapters, shared CPD fitting/calibration,
+the detection step and necessary CPD-specific integration, reporting and test code.
+The join change is conditional on the new CPD schema: non-CPD aggregation retains
+its existing behavior. Classifiers, smoothers, encoders, forecasting, labels,
+eligibility, patient splitting, task definitions and horizons are not changed.
+
+Both pipeline documents retain their intended role: \code{pipeline.pdf} specifies
+the research paths and controlled comparisons; \code{pipeline.tex} explains fitted
+patient preprocessing, forward inference and clinical classifier separation.
+Candidate CPD still emits per-reading artifacts, feeds daily features to the same
+join/model/evaluate stages, uses no clinical labels, and remains reusable across
+folds. Missing detector output never removes a labelled day or patient.
+
+\section{Design decisions and reasons}
+\begin{enumerate}
+\item \textbf{History is bounded by timestamps.} Null builders receive an exclusive
+activation cutoff and a lower bound. Whole-day selection alone cannot enforce
+causality at mid-day arming. Only completed abnormal dates affect calibration.
+\item \textbf{H8 is a real-observation boundary.} Use the existing shared
+\code{assign_chunks}, not a second threshold implementation. BOCPD/HMM and Kalman
+monitoring reset evidence at chunk boundaries, because the gap itself is not an
+observed physiological change. Kalman CUSUM also resets across missing nominal steps
+(gap greater than 1.5 steps), conservatively avoiding accumulation across disconnected
+excursions. This changes sensitivity and requires recalibration.
+\item \textbf{Closed bins publish forward.} A median is available at its declared
+bin close, not at its last included reading. Terminal open bins are omitted. Holders
+must match the current chunk, satisfy current settling, and expire after one nominal
+step. KCPD evaluates at actual eligible arrivals rather than backdating scheduled
+clock events. Its optional second binning layer is rejected; shared detection
+preprocessing is the single binning layer.
+\item \textbf{Retain raw support independently.} Detection merges the original raw
+channel with transformed support. Raw nightly drift and STS use complete raw history,
+not the transform's finite-output mask. Artifact channel identity is explicit, and
+raw measurements remain available to the model. Contradictory raw/transform source
+generations must not be silently mixed.
+\item \textbf{Refit in compatible coordinates.} At each daily normalization refit,
+causally replay the bounded healthy history to initialize the new OU state. Old
+normalized latent means/covariances cannot be carried unchanged into new coordinates.
+Store fitted t scale as well as degrees of freedom and use both in HMM likelihoods.
+HMM remains forward-only with fixed dwell/variance-ratio parameters: no full-record
+EM or Viterbi is introduced.
+\item \textbf{Insufficient history means unavailable.} Do not reintroduce excluded
+abnormal history or silently fall back to all past dates. After nonwear at least as
+long as the baseline window, restart burn-in in a new epoch. Short healthy windows
+do not produce zero-centered unit-scale pseudo-baselines. Failed/insufficient null
+calibrations disable the affected simulated streams, with a recorded reason.
+\item \textbf{Conservative degeneracy guard.} Keep the event-rate envelope but add
+a default maximum 10\% per-stream null occupancy, declared in the shared CPD
+\code{max_null_occupancy} setting. This candidate guard prevents an almost
+always-on flat-score solution from satisfying a low event budget. It is a declared,
+keyed engineering guard, not a clinical target or empirically tuned optimum. Neither
+per-stream occupancy nor a null fit guarantees a real-world ensemble alarm rate.
+\item \textbf{Missing scores cannot alarm.} Hit masks require finite scores and
+thresholds. Threshold-relative excess uses a bounded denominator even for zero or
+negative thresholds. The representative ensemble phenotype follows declared method
+order rather than comparing unlike probability/score magnitudes. Every individual
+detector output remains available; representative phenotype is not a diagnosis.
+\item \textbf{Nightly verdicts are explicit impulses.} Decide each completed night
+using only its own available sleep observations; fallback uses 00:00--06:00 readings
+but publishes no earlier than the common noon decision time. Enumerate calendar
+nights even without readings on the following date. Do not defer verdicts through
+settling or more than a day of nonwear. Distinct consecutive alarm nights remain
+distinct; held magnitudes expire after a day. Nightly drift keeps its analytic
+threshold as an explicitly unvalidated per-night approximation; simulated exposure
+and eligible-night exposure are not silently equated.
+\item \textbf{Exposure is a declared proxy.} Retain nominal observed-support minutes,
+not an invented duration bridging nonwear. Within an HR bin, cap support at bin
+width and actual observed nominal minutes. Calibration, fit records and reports
+name this convention; it is not proof of actual continuous wear.
+\item \textbf{Failures preserve population.} A patient exception yields retained raw
+support and missing CPD features with failed status. Other patients continue.
+Artifact completeness reports failures; uncaught coordinator errors mark the artifact
+failed. A partial artifact is not a validated successful experiment.
+\item \textbf{Version all result-affecting CPD dependencies.} Hash shared CPD code,
+configuration, segmentation and actual channel/state file contents. Store the new
+CPD logic/schema generation. Never reuse pre-fix CPD artifacts as candidate results.
+\end{enumerate}
+
+\section{Issue-by-issue disposition}
+``Implemented'' below always means candidate source changes, not passing runtime
+verification. Statistical adequacy remains a separate gate.
+\begin{longtable}{@{}p{0.09\textwidth}p{0.83\textwidth}@{}}
+\toprule Issue & Modification or explicit disposition \\
+\midrule\endhead
+C01 & Timestamp-bounded shuffle histories, including STS fallback; no future-in-day pools. \\
+C02 & Rebuild chunks from finite raw observations using the canonical chunker; filler rows cannot conceal gaps. \\
+C03 & Preserve canonical raw support in detection output; record signal identity; CPD schema marks the narrow join adapter. \\
+C04 & New logic generation plus hashes of shared code, config, chunking, raw and state contents; downstream CPD inputs receive new keys. \\
+C05 & Per-night sleep availability replaces whole-record sleep detection. \\
+C06 & Record input causality status. Upstream noncausal smoother parameters are not repaired by CPD; retrospective artifacts remain permitted and explicitly uncertified for prospective use. \\
+C07 & Restrict mapped outputs by same chunk, current settling and expiry; old armed flags cannot cross resets. \\
+C08 & Preserve within-day chunks in shuffle twins; sampled-block boundaries receive explicit resets. \\
+C09 & Add keyed per-stream occupancy guard and null union diagnostics; real-data alarm budget remains unvalidated. \\
+C10 & Finite-score/threshold hit masks; well-defined excess at nonpositive thresholds. \\
+C11 & KCPD publishes actual-arrival evaluations and never extends a grid backward through gaps. \\
+C12 & Replay past history under new normalization before filtering each new segment. \\
+C13 & Explicit CUSUM reset policy across chunks/disconnected steps; ACF pairs/windows restricted by chunk. \\
+C14 & Explicit per-night alarm indices, independent of a held score's rising edges. \\
+C15 & Calendar-night enumeration; stale/unarmed verdicts do not publish late or overwrite simultaneous impulses. \\
+C16 & Analytic drift retained, labelled analytic/unvalidated and per eligible night; empirical rate verification is still required. \\
+C17 & Check STS convergence and finite parameters; guard tail fits and the entire STS calibration pipeline; recorded shuffle fallback or disabled status. \\
+C18 & Raw support for nightly drift and STS is independent of transformed-output availability. \\
+C19 & Clock-boundary closed bins; no terminal partial-bin publication; internal KCPD rebinning rejected. \\
+C20 & Name nominal support exposure; cap HR bin exposure by real included support; per-detector report exposure uses availability. True wear-duration estimation remains outside this candidate. \\
+C21 & Retain fitted t scale and degrees of freedom; refit from past data and supply aligned HMM emission parameters; correct HMM label. \\
+C22 & No silent unhealthy/all-history fallback; insufficient fits are unavailable; exclusions are as-of completed dates. Slow baseline absorption still requires validation. \\
+C23 & Declared-order representative phenotype; stream-coupled Kalman phenotype/magnitude/excess; preserve per-method outputs. \\
+C24 & CPD-only join counts flagged samples as counts and sums explicit event onsets, including across midnight; old non-CPD aggregation is retained. \\
+C25 & BOCPD H8 resets, strict deterministic top-K pruning and same-chunk phenotype windows. The prior-predictive recursion remains the specified model; Bayesian-reference and injection verification remain pending. \\
+C26 & Align collided STS measurements/covariates with the same last-row rule; fit tails only on observed post-burn grid cells; reject nonfinite simulations. Gaussian-fit/t-shock adequacy, burst fidelity, phase and library simulation behavior remain unvalidated. \\
+C27 & Reject empty/duplicate ensembles, unsupported channel settings, invalid domains, malformed timestamps and missing calibration hooks. Shared adapter validation rejects misaligned/unsorted series. \\
+C28 & Patient status/failure artifacts, population-preserving missing features, coordinator failure status, configurable worker count; remove blanket warning suppression. \\
+C29 & Match calibration report inputs/settings/code, constrain signal kind/smoother, use artifact-format readers, and count explicit events with available-support exposure. \\
+C30 & Add focused regression fixtures for later execution and update affected CPD selftest assumptions. No test success is claimed. Independent null/injection and held-out validation remain mandatory. \\
+C31 & Store noise fit snapshots, score/threshold diagnostics, per-method availability, analytic-threshold and fallback status, input causality and candidate-validation metadata. Detailed diagnostics do not enter classifier features. \\
+C32 & Restart calibration epochs after baseline-length absences; never arm a generic empty-history baseline. \\
+C33 & Load sleep and activity independently; retain useful partial state information without inventing missing channels. \\
+\bottomrule
+\end{longtable}
+
+\section{Changed files and review boundaries}
+\begin{itemize}
+\item \code{wearable/cpd/_contracts.py}: shared finite hit/excess rules, ordered
+series validation and gap-aware event onsets.
+\code{wearable/cpd/__init__.py} documents the calibrated-stream and diagnostic
+contract required by the candidate detection step.
+\item \code{wearable/cpd/_whiten.py}: bounded shuffle pools, chunk preservation,
+support exposure, closed bins, refit replay, tail snapshots, stale-history epochs,
+occupancy guard and event-aware threshold selection.
+\item \code{wearable/cpd/_sts.py}: convergence/finite checks, collision alignment,
+observed-residual tail fitting and simulation guards.
+\item \code{wearable/cpd/bocpd.py}, \code{kcpd.py}, \code{kalman.py},
+\code{hmm.py}, \code{drift.py} in that same directory: method-specific changes
+listed above, plus additive score and availability diagnostics where applicable.
+\item \code{wearable/steps/detect.py}: input/support assembly, calibration,
+publication mapping, full dependency keying, diagnostic artifacts and failure handling.
+\item \code{wearable/steps/join.py}: only the CPD-schema path uses event-onset
+columns, count names, missing-value preservation and diagnostic exclusion.
+\item \code{scripts/cpd_calibration_compare.py}: matched artifacts and supported
+formats, explicit onset rates and detector-specific exposure. Partial-failure
+artifacts are excluded from calibration comparisons; unmatched runs raise an error.
+\item \code{tests/test_cpd_candidate.py}: new regression specifications.
+\code{wearable/selftest.py}: only affected CPD assertions/expectations are changed.
+\end{itemize}
+
+\section{Compatibility and recomputation}
+The detector contract still supplies anomaly, phenotype, magnitude and severity
+arrays. Optional score/availability diagnostics are additive. Steps remain independent;
+the only existing cross-step reader exception is unchanged. CPD-specific join changes
+are required to make event counts and model-variable preservation consistent with
+both pipeline documents. No labels or clinical probability thresholds are changed.
+The join logic version gains a CPD-only \code{-cpd_candidate_1} suffix; baseline
+and non-CPD join cache versions remain unchanged. Raw-versus-artifact value checks
+reject contradictory input generations before combining them. Disabled detectors
+and unavailable periods yield missing flags/magnitudes, not fabricated negative
+observations; availability remains explicit. Event calibration and aggregation both
+terminate events at unavailable rows and declared gaps.
+Old CPD artifacts and results are historical. Rebuild detection and dependent joins,
+models and evaluation on the data machine; use exact keys when selecting artifacts.
+Do not combine old and candidate event-count columns in one reported comparison.
+
+\section{Validation record and remaining gates}
+Python execution is explicitly prohibited for this task. Static checks and LaTeX
+compilation, if performed, are reported separately from behavioral verification.
+The fixes document was successfully compiled with \code{pdflatex}, with build
+artifacts directed to \code{/tmp/cpd-fixes-build}; this executes no Python code.
+\textbf{Static checks:} the edited Python source was parsed as text using the
+JavaScript \code{@lezer/python} grammar installed under \code{/tmp}, not using a
+Python interpreter. This checks grammar only. \code{git diff --check} checks patch
+whitespace. The new \code{tests/test_cpd_candidate.py} contains 20 focused unittest
+fixtures; they have not been run. Existing CPD selftest expectations were updated
+for additive diagnostics, declared-order voting and immutable terminal-bin outputs;
+the prefix check no longer excludes the last bin. Numerical assertions were not
+relaxed to claim passing results.
+Before accepting this candidate, execute the new regression fixtures and existing
+CPD selftests; investigate every failure rather than weakening assertions. Then use
+independent nulls and injected mean, variance and slow-drift changes to quantify false
+alarms, occupancy, delay, recovery, sparse-wear and gap behavior. Finally evaluate
+matched CPD/no-CPD research paths on unchanged held-out patients and days. Tune
+settings only within the training/validation boundary. Passing a syntax check or
+compiling this document establishes none of those numerical or clinical properties.
+\end{document}

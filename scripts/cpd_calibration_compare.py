@@ -26,13 +26,14 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from wearable import config, cpd                                   # noqa: E402
+from wearable import store                                        # noqa: E402
 from wearable.cpd import _whiten as W                              # noqa: E402
 
 RUNS = config.RUNS_DIR / "detect"
 OUT = config.REPORTS_DIR / "cpd_calibration"
 
 
-def latest(signal, calibration, budget):
+def latest(signal, calibration, budget, on="residual", smoothing="gammadglm"):
     name = "+".join(cpd.DEFAULT_ENSEMBLE) + ("" if signal == config.DEFAULT_CHANNEL else f"@{signal}")
     best = None
     for m in (RUNS / name).glob("*/manifest.json"):
@@ -41,6 +42,14 @@ def latest(signal, calibration, budget):
         if man.get("status") != "complete" or abs(p.get("budget", -1) - budget) > 1e-6:
             continue
         if p.get("calibration", "shuffle") != calibration or p.get("limit_patients"):
+            continue
+        if p.get("on") != on or not p.get("logic"):
+            continue
+        if man.get("stats", {}).get("completeness") != "complete":
+            continue
+        if on in ("smoothed", "residual") and not any(
+                i.get("step") == "smooth" and i.get("method", "").split("@")[0] == smoothing
+                for i in man.get("inputs", [])):
             continue
         if best is None or man["created"] > best[1]["created"]:
             best = (m.parent, man)
@@ -53,15 +62,20 @@ def q(s):
 
 
 def real_rates(path, step_min):
-    cols = ["p_id", "armed", "anomaly_present"] + [f"{m}_anomaly" for m in cpd.DEFAULT_ENSEMBLE]
-    t = pd.read_csv(path / "detected.csv", usecols=cols)
+    man = json.loads((path / "manifest.json").read_text())
+    artifact = store.load(man["step"], man["method"], man["key"])
+    t = artifact.read_table("detected")
     a = t[t["armed"] == 1]
     rows = []
     for pid, g in a.groupby("p_id"):
         worn = len(g) * step_min / 1440
         r = {"p_id": pid, "worn_days": worn, "flagged": g["anomaly_present"].mean()}
         for c in ["anomaly_present"] + [f"{m}_anomaly" for m in cpd.DEFAULT_ENSEMBLE]:
-            r[c] = W.events(g[c].to_numpy() == 1) / worn
+            available = (g[f"{c.removesuffix('_anomaly')}_available"] == 1
+                         if c != "anomaly_present" else pd.Series(True, index=g.index))
+            exposure = available.sum() * step_min / 1440
+            r[c] = (g.loc[available, f"{c}_event_start"].sum() / exposure
+                    if exposure > 0 else float("nan"))
         rows.append(r)
     return pd.DataFrame(rows)
 
@@ -70,12 +84,20 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--budget", type=float, default=config.CPD_BUDGET)
     ap.add_argument("--signal", nargs="+", default=["hrv", "hr"])
+    ap.add_argument("--on", default="residual", choices=["raw", "smoothed", "residual"])
+    ap.add_argument("--smoothing", default="gammadglm")
     a = ap.parse_args()
     OUT.mkdir(parents=True, exist_ok=True)
     share = a.budget / len(cpd.DEFAULT_ENSEMBLE)
     for sig in a.signal:
         step_min = config.CPD_SETTINGS[sig]["detect"]["step_min"]
-        found = {c: latest(sig, c, a.budget) for c in config.CPD_CALIBRATIONS}
+        found = {c: latest(sig, c, a.budget, a.on, a.smoothing) for c in config.CPD_CALIBRATIONS}
+        paired = [f[1] for f in found.values() if f]
+        def identity(m):
+            p = {k: v for k, v in m["params"].items() if k not in ("calibration", "sts")}
+            return (p, m["inputs"], m["code"]["method_source_hash"])
+        if len(paired) == 2 and identity(paired[0]) != identity(paired[1]):
+            raise ValueError("calibration artifacts have different inputs/settings/code; select matched runs")
         print(f"\n{'=' * 78}\n{sig.upper()}  budget {a.budget:.3g}/worn day "
               f"(per detector {share:.3g})\n{'=' * 78}")
         for c, f in found.items():
@@ -83,11 +105,9 @@ def main():
                                   if f else "no complete artifact"))
         cal = {}
         for c, f in found.items():
-            if f and (f[0] / "calibration.csv").exists():
-                cal[c] = pd.read_csv(f[0] / "calibration.csv")
-            elif f:
-                print(f"  ! {c}: artifact has no calibration table (built before it existed; "
-                      f"rerun detect with force=True)")
+            if f:
+                art = store.load(f[1]["step"], f[1]["method"], f[1]["key"])
+                cal[c] = art.read_table("calibration")
         # fitted STS parameters
         if "sts" in cal:
             s = cal["sts"]
@@ -97,7 +117,7 @@ def main():
             params.to_csv(OUT / f"{sig}_params.csv")
             print("\n  STS model used per recalibration:",
                   s["calibration"].value_counts().to_dict())
-            print("  STS exogenous terms:", s["sts_exog"].value_counts().to_dict())
+            print("  STS exogenous terms:", s.get("sts_exog", pd.Series(dtype=str)).value_counts().to_dict())
             print("  fitted parameters (log scale; beta.x1/x2 = the listed exog in order):")
             print("   " + params.to_string().replace("\n", "\n   "))
         # thresholds and null rates, both methods
@@ -122,12 +142,17 @@ def main():
             if not f:
                 continue
             r = real_rates(f[0], step_min)
+            if r.empty:
+                print(f"  {c}: no available exposure; no rate reported")
+                continue
             w = r["worn_days"]
             row = {"calibration": c, "patients": len(r), "worn_days": round(w.sum()),
                    "time flagged": round(float((r["flagged"] * w).sum() / w.sum()), 4)}
             for col, lab in [("anomaly_present", "ensemble")] + \
                     [(f"{m}_anomaly", m) for m in cpd.DEFAULT_ENSEMBLE]:
-                row[f"{lab} pooled"] = round(float((r[col] * w).sum() / w.sum()), 3)
+                # Individual detector rates have detector-specific availability;
+                # do not weight them by ensemble exposure as though it were equal.
+                row[f"{lab} patient median"] = round(float(r[col].median()), 3)
             row["ensemble per-patient median"] = round(float(r["anomaly_present"].median()), 3)
             rr.append(row)
         if rr:

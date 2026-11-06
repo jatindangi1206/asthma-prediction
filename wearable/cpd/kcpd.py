@@ -1,6 +1,6 @@
 """Kernel Change Point Detection on the whitened residual — online two-window MMD.
 
-Every `stride_min` minutes, compare the PAST window (the `half_min` minutes before the
+At the first arrival after each `stride_min` interval, compare the PAST window (the `half_min` minutes before the
 present window) with the PRESENT window (the last `half_min` minutes) by the unbiased
 MMD² under an RBF kernel (bandwidth by the median heuristic on the block). Windows are
 defined in clock minutes, so HR and HRV compare the same stretch of time.
@@ -26,6 +26,7 @@ evaluation at time T uses readings up to T.
 """
 
 import numpy as np
+from wearable.cpd._contracts import series, positive, hit, excess
 
 DEFAULTS = {
     "half_min": 180.0,         # each window's length (3 h)
@@ -52,17 +53,16 @@ def _bins(t, z, chunk, bin_min):
     ok = np.flatnonzero(np.isfinite(z))
     if bin_min <= 0:
         return t[ok], z[ok], chunk[ok], ok
-    key = np.floor(t[ok] / bin_min)
-    edges = np.flatnonzero((np.diff(key) != 0) | (np.diff(chunk[ok]) != 0)) + 1
-    groups = np.split(np.arange(ok.size), edges)
-    last = np.array([ok[g[-1]] for g in groups])
-    return (t[last], np.array([np.median(z[ok[g]]) for g in groups]), chunk[last], last)
+    raise ValueError("KCPD internal binning is disabled; use detect's closed-bin preprocessing")
 
 
 def score(time, values, priors=None, **params):
     p = {**DEFAULTS, **params}
     pr = priors or {}
-    t, z = np.asarray(time, float), np.asarray(values, float)
+    t, z, chunk = series(time, values, priors)
+    positive(half_min=p["half_min"], stride_min=p["stride_min"], n_perm=p["n_perm"])
+    if not 0 < p["coverage"] <= 1 or int(p["n_perm"]) != p["n_perm"]:
+        raise ValueError("coverage must be in (0,1] and n_perm must be an integer")
     n = len(z)
     chunk = np.asarray(pr.get("chunk", np.zeros(n, int)))
     step = float(pr.get("step_min") or (np.median(np.diff(t)) if n > 1 else 1.0))
@@ -76,7 +76,13 @@ def score(time, values, priors=None, **params):
     # first time of each chunk, to keep both halves inside one chunk
     chunk_start = {c: bt[bc == c][0] for c in np.unique(bc)}
     rng = np.random.default_rng(RNG_SEED)
-    grid = np.arange(bt[0] + 2 * w, bt[-1] + 1e-9, p["stride_min"])
+    # Evaluate on the first actual arrival after each due interval, never backdate.
+    grid = []
+    due = bt[0] + 2 * w
+    for arrival in bt:
+        if arrival >= due:
+            grid.append(arrival)
+            due = arrival + p["stride_min"]
     last_i, last_val = None, np.nan
     for T in grid:
         j = np.searchsorted(bt, T, side="right") - 1       # the present point
@@ -86,8 +92,8 @@ def score(time, values, priors=None, **params):
         if chunk_start[c] > T - 2 * w:
             val = np.nan
         else:
-            past = (bt > T - 2 * w) & (bt <= T - w)
-            pres = (bt > T - w) & (bt <= T)
+            past = (bt > T - 2 * w) & (bt <= T - w) & (bc == c)
+            pres = (bt > T - w) & (bt <= T) & (bc == c)
             nx, ny = int(past.sum()), int(pres.sum())
             if nx < need or ny < need:
                 val = np.nan
@@ -110,6 +116,11 @@ def score(time, values, priors=None, **params):
     if last_i is not None:
         out[last_i:] = last_val
     out[~np.isfinite(z)] = np.nan
+    # A held statistic is not valid in the beginning of another chunk.
+    for c in np.unique(chunk):
+        at = np.flatnonzero(chunk == c)
+        if at.size:
+            out[at[t[at] < t[at[0]] + 2 * w]] = np.nan
     return {"shift": out}
 
 
@@ -120,13 +131,15 @@ def detect(time, values, priors=None, **params):
            "magnitude": np.zeros(n), "severity": np.zeros(n)}
     if n < 2:
         return out
-    s = np.nan_to_num(score(time, values, priors, **params)["shift"], nan=0.0)
+    s = score(time, values, priors, **params)["shift"]
+    out["scores"] = {"shift": s}
     th = {**THRESHOLDS, **(priors or {}).get("thresholds", {})}["shift"]
-    hit = s >= th
-    out["anomaly"] = hit.astype(int)
-    out["phenotype"] = np.where(hit, PHENOTYPE, "normal").astype(object)
-    out["magnitude"] = np.maximum(s, 0.0)
-    out["severity"] = np.clip(s / (2.0 * th), 0.0, 1.0)
+    out["available"] = np.isfinite(s) & np.isfinite(th)
+    fired = hit(s, th)
+    out["anomaly"] = fired.astype(int)
+    out["phenotype"] = np.where(fired, PHENOTYPE, "normal").astype(object)
+    out["magnitude"] = np.where(np.isfinite(s), np.maximum(s, 0.0), np.nan)
+    out["severity"] = excess(s, th)
     return out
 
 

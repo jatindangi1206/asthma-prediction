@@ -187,7 +187,7 @@ def _check_causality() -> None:
 
 
 def _check_vote() -> None:
-    """The ensemble vote: OR, highest severity claims the phenotype, ties to the earliest."""
+    """OR fusion; representative phenotype follows declared method order."""
     from wearable.steps.detect import _vote
 
     def per(anom, sev, phen, mag=None):
@@ -199,17 +199,17 @@ def _check_vote() -> None:
     a, p, m = _vote([per([1, 0, 1, 1], [0.2, 0.0, 0.9, 9.0], list("abcd")),
                      per([0, 1, 1, 1], [0.0, 0.5, 0.1, 9.0], list("wxyz"))], armed)
     assert a.tolist() == [1, 1, 1, 0], a            # OR, and burn-in suppresses row 3
-    assert p.tolist() == ["a", "x", "c", "burn_in"], p   # highest severity claims it
+    assert p.tolist() == ["a", "x", "c", "burn_in"], p
     assert m.tolist() == [0.2, 0.5, 0.9, 0.0], m
 
-    # a tie goes to the earliest method; an unarmed row is never claimed
-    _, p2, _ = _vote([per([1], [0.5], ["first"]), per([1], [0.5], ["second"])],
+    # Unlike severities never reorder the declared method priority.
+    _, p2, _ = _vote([per([1], [0.1], ["first"]), per([1], [0.9], ["second"])],
                      np.array([True]))
     assert p2.tolist() == ["first"], p2
-    # severity at or below the -1.0 floor still counts as an anomaly but claims nothing
+    # Severity does not suppress a valid detector's phenotype claim.
     a3, p3, _ = _vote([per([1], [-1.0], ["floored"])], np.array([True]))
-    assert a3.tolist() == [1] and p3.tolist() == ["normal"], (a3, p3)
-    print("  vote         OR + severity argmax; ties earliest; -1.0 floor claims nothing")
+    assert a3.tolist() == [1] and p3.tolist() == ["floored"], (a3, p3)
+    print("  vote         OR + declared method priority; unarmed rows never claim")
 
 
 def _check_metrics() -> None:
@@ -555,7 +555,9 @@ def _check_cpd_settings() -> None:
     for name, mod in cpd.load_ensemble():
         a, b = mod.detect(t, v, {"sigma0": 1.0}), mod.detect(t, v, {"sigma0": 1.0},
                                                              **mod.DEFAULTS)
-        assert all(np.array_equal(a[k], b[k]) for k in a), f"{name}: DEFAULTS != none"
+        assert all(np.array_equal(a[k], b[k], equal_nan=True) if a[k].dtype.kind != "O"
+                   else np.array_equal(a[k], b[k])
+                   for k in ("anomaly", "phenotype", "magnitude", "severity")), f"{name}: DEFAULTS != none"
     # An override reaches the method; a misspelt one raises instead of being ignored.
     config.CPD_SETTINGS["_t"] = {"kcpd": {"half_min": 99}, "detect": {"burn_in_min": 7}}
     try:
@@ -719,8 +721,8 @@ def _check_detect_pipeline() -> None:
     """The whole detect step on synthetic no-change patients, per channel:
 
     * causal — a run on a prefix reproduces the full run wherever they overlap (all
-      columns, every detector, the noise model, the calibration), except the one bin
-      still open at the cut when the channel is binned;
+      columns, every detector, the noise model, the calibration), including cuts
+      inside terminal bins, which now remain unpublished;
     * calibrated — on pure noise the ensemble stays within a few times its budget
       (0.33 per worn day), where the old detectors fired ~38 times per worn day on real
       HR. Not exactly at budget: in the first week the thresholds come from a twin of a
@@ -739,10 +741,8 @@ def _check_detect_pipeline() -> None:
         cut = int(len(df) * 0.7)
         pre = D._detect_patient(df.iloc[:cut].copy(), col, raw, cpd.DEFAULT_ENSEMBLE,
                                 per, step, 1 / 3)
-        keep = (pre.createdTime < pre.createdTime.iloc[-1]
-                - pd.Timedelta(minutes=step["bin_min"])).to_numpy()
-        a = full.iloc[:cut].reset_index(drop=True)[keep]
-        b = pre.reset_index(drop=True)[keep]
+        a = full.iloc[:cut].reset_index(drop=True)
+        b = pre.reset_index(drop=True)
         bad = [c for c in a.columns if not a[c].equals(b[c])]
         assert not bad, f"{channel}: a prefix run differs from the full run in {bad}"
         arm = full[full["armed"] == 1]

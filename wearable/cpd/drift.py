@@ -20,9 +20,9 @@ zero, so each alarm covers one night and a lasting shift alarms again a few nigh
 Sleep is the most comparable stretch of the day (no activity, posture or meals), and
 asthma worsens at night.
 
-Night D is only known once its window closes, so its score is set at the first armed
-reading at or after 12:00 on D and held until the next night's; the alarm itself is
-flagged on that one reading. Causal.
+Night D publishes at the first observation at/after its common noon decision only
+if that observation is eligible and less than one day late. No verdict is moved
+through settling. Held magnitudes expire after a day; alarms are explicit impulses.
 
 The threshold is analytic, not simulated: u_D is ~N(0,1) per night under no change, and
 Siegmund's approximation gives the CUSUM's average run length, so `threshold_for` solves
@@ -31,6 +31,7 @@ for the h that fires `rate` times per worn day (≈ per night).
 
 import numpy as np
 from scipy.optimize import brentq
+from wearable.cpd._contracts import series, positive, excess
 
 _SLEEP = 1                       # cpd/_whiten.py's SLEEP state code
 
@@ -55,7 +56,12 @@ def _siegmund(k, h):
 def threshold_for(rate, **params):
     """h such that the CUSUM fires `rate` times per night on N(0,1) nightly levels."""
     p = {**DEFAULTS, **params}
+    positive(rate=rate, cusum_k=p["cusum_k"])
+    if p["direction"] not in (-1, 0, 1):
+        raise ValueError("direction must be -1, 0 or 1")
     arl = 1.0 / max(rate, 1e-9) * (1 if p["direction"] else 2)   # two-sided: each side half
+    if _siegmund(p["cusum_k"], 0.01) >= arl:
+        return {"level": 0.01}
     return {"level": float(brentq(lambda h: _siegmund(p["cusum_k"], h) - arl, 0.01, 200))}
 
 
@@ -70,36 +76,53 @@ def _nights(stamp, raw, step, p, armed=None, state=None):
     suppress the verdict, so it lands on the first armed one."""
     day = stamp.astype("datetime64[D]")
     ok = np.isfinite(raw)
-    has_sleep = state is not None and np.any(np.asarray(state) == _SLEEP)
     h = np.timedelta64(60, "m")
     out = {}
-    for d in np.unique(day):
+    if not len(day):
+        return out
+    for d in np.arange(day[0], day[-1] + np.timedelta64(2, "D")):
+        decision = d + int(p["window_end_h"]) * h
+        if decision > stamp[-1]:
+            continue
+        lo = d - np.timedelta64(1, "D") + int(p["window_start_h"]) * h
+        # Select the rule for THIS completed night, never from a future sleep flag.
+        has_sleep = state is not None and np.any(
+            (stamp >= lo) & (stamp < decision) & (np.asarray(state) == _SLEEP))
         if has_sleep:
-            lo = d - np.timedelta64(1, "D") + int(p["window_start_h"]) * h
-            hi = d + int(p["window_end_h"]) * h
+            hi = decision
             m = ok & (stamp >= lo) & (stamp < hi) & (np.asarray(state) == _SLEEP)
         else:
             hi = d + 6 * h
             m = ok & (stamp >= d) & (stamp < hi)
         if m.sum() * step < p["min_sleep_minutes"]:
             continue
-        after = np.searchsorted(stamp, hi)
-        if armed is not None:
-            ok_after = np.flatnonzero(armed[after:])
-            after = after + int(ok_after[0]) if ok_after.size else len(stamp)
-        if after < len(stamp):
-            out[d] = (float(np.median(raw[m])), int(after))
+        after = int(np.searchsorted(stamp, decision))
+        # Do not move an old verdict through arbitrary nonwear or settling. An
+        # expired/unarmed night may inform the baseline but emits no verdict.
+        eligible = (after < len(stamp) and stamp[after] < decision + np.timedelta64(1, "D")
+                    and (armed is None or armed[after]))
+        out[d] = (float(np.median(raw[m])), after if eligible else -1)
     return out
 
 
-def score(time, values, priors=None, **params):
+def _scores(time, values, priors=None, **params):
     p = {**DEFAULTS, **params}
     pr = priors or {}
+    series(time, values, pr)
+    positive(baseline_nights=p["baseline_nights"], min_nights=p["min_nights"],
+             min_sleep_minutes=p["min_sleep_minutes"], cusum_k=p["cusum_k"])
+    if p["direction"] not in (-1, 0, 1):
+        raise ValueError("invalid drift direction")
+    if (p["min_nights"] > p["baseline_nights"] or
+            any(int(p[k]) != p[k] for k in ("min_nights", "baseline_nights", "window_start_h", "window_end_h")) or
+            not 0 <= p["window_end_h"] < p["window_start_h"] < 24):
+        raise ValueError("drift requires integer night counts and a cross-midnight hour window")
     n = len(values)
     out = np.full(n, np.nan)
+    verdict = np.zeros(n, bool)
     stamp = pr.get("stamp")
     if stamp is None:
-        return {"level": out}
+        return out, verdict
     raw = np.asarray(pr.get("raw", values), float)
     step = float(pr.get("step_min") or 1.0)
     th = {**THRESHOLDS, **pr.get("thresholds", {})}["level"]
@@ -109,8 +132,16 @@ def score(time, values, priors=None, **params):
     dates = sorted(nights)
     up = dn = 0.0
     base, last_i, last_val = [], None, np.nan
+    published = np.full(n, np.nan)
+    previous_day = None
     for d in dates:
         level, i = nights[d]
+        if previous_day is not None and d - previous_day > np.timedelta64(1, "D"):
+            up = dn = 0.0
+        previous_day = d
+        if i < 0:
+            base.append((d, level))
+            continue
         recent = [(dd, lv) for dd, lv in base
                   if (d - dd).astype("timedelta64[D]").astype(int) <= p["baseline_nights"]]
         if len(recent) >= p["min_nights"]:
@@ -123,19 +154,28 @@ def score(time, values, priors=None, **params):
             val = {1: up, -1: dn}.get(int(p["direction"]), max(up, dn))
         else:
             val = np.nan
+            up = dn = 0.0
         if np.isfinite(val) and val >= th:
             # Signal, then restart the CUSUM (the standard procedure): a shift that
             # persists re-alarms every few nights instead of holding one alarm for
             # weeks — measured, the no-restart version flagged 69% of HR time.
             up = dn = 0.0
+            verdict[i] = True
         else:
             base.append((d, level))                  # flagged nights stay out of baseline
         if last_i is not None and i > last_i:
             out[last_i:i] = last_val
+            published[last_i:i] = time[last_i]
         last_i, last_val = i, val
     if last_i is not None:
         out[last_i:] = last_val
-    return {"level": out}
+        published[last_i:] = time[last_i]
+    out[np.asarray(time) - published >= 1440.0] = np.nan
+    return out, verdict
+
+
+def score(time, values, priors=None, **params):
+    return {"level": _scores(time, values, priors, **params)[0]}
 
 
 def detect(time, values, priors=None, **params):
@@ -145,16 +185,14 @@ def detect(time, values, priors=None, **params):
            "magnitude": np.zeros(n), "severity": np.zeros(n)}
     if n < 2:
         return out
-    s = np.nan_to_num(score(time, values, priors, **params)["level"], nan=0.0)
+    s, hit = _scores(time, values, priors, **params)
     th = {**THRESHOLDS, **(priors or {}).get("thresholds", {})}["level"]
     # A drift alarm is a once-a-night verdict, not a state: flag the reading where it
     # arrives; magnitude and severity keep holding through the day as features.
-    held = s >= th
-    hit = held & ~np.r_[False, held[:-1]]
     out["anomaly"] = hit.astype(int)
     out["phenotype"] = np.where(hit, PHENOTYPE, "normal").astype(object)
     out["magnitude"] = s
-    out["severity"] = np.clip(s / (2.0 * th), 0.0, 1.0)
+    out["severity"] = excess(s, th)
     return out
 
 

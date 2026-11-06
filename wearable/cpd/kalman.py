@@ -18,6 +18,7 @@ standalone use. Causal: every statistic at t uses readings up to t.
 """
 
 import numpy as np
+from wearable.cpd._contracts import series, positive, hit, excess
 
 DEFAULTS = {
     "cusum_k": 0.5,            # CUSUM slack, in z units (tuned to a ~1-sd shift)
@@ -40,7 +41,10 @@ def _step(time, priors):
 
 def score(time, values, priors=None, **params):
     p = {**DEFAULTS, **params}
-    t, z = np.asarray(time, float), np.asarray(values, float)
+    t, z, chunk = series(time, values, priors)
+    positive(cusum_k=p["cusum_k"], acf_window_min=p["acf_window_min"])
+    if not 0 < p["coverage"] <= 1:
+        raise ValueError("coverage must be in (0,1]")
     n = len(z)
     step = _step(t, priors)
     ok = np.isfinite(z)
@@ -49,6 +53,8 @@ def score(time, values, priors=None, **params):
     drift = np.full(n, np.nan)
     sp = sn = 0.0
     for i in range(n):
+        if i and (chunk[i] != chunk[i - 1] or t[i] - t[i - 1] > 1.5 * step):
+            sp = sn = 0.0
         if ok[i]:
             sp = max(0.0, sp + z[i] - p["cusum_k"])
             sn = max(0.0, sn - z[i] - p["cusum_k"])
@@ -57,11 +63,14 @@ def score(time, values, priors=None, **params):
     # consecutive pairs (no gap wider than 1.5 steps), summed over a trailing window
     pair = np.zeros(n)
     good = np.zeros(n, bool)
-    good[1:] = ok[1:] & ok[:-1] & (np.diff(t) <= 1.5 * step)
+    good[1:] = ok[1:] & ok[:-1] & (np.diff(t) <= 1.5 * step) & (chunk[1:] == chunk[:-1])
     prod = np.where(good, np.r_[0.0, z[1:] * z[:-1]], 0.0)
     pair[good] = 1
     c1, c2, cn = (np.r_[0.0, np.cumsum(a)] for a in (prod, prod ** 2, pair))
     lo = np.searchsorted(t, t - p["acf_window_min"], side="right")
+    chunk_start = np.maximum.accumulate(np.where(
+        np.r_[True, chunk[1:] != chunk[:-1]], np.arange(n), 0)) if n else np.empty(0, int)
+    lo = np.maximum(lo, chunk_start)
     hi = np.arange(1, n + 1)
     m = cn[hi] - cn[lo]
     num, den = c1[hi] - c1[lo], c2[hi] - c2[lo]
@@ -79,16 +88,19 @@ def detect(time, values, priors=None, **params):
     if n < 2:
         return out
     s = score(time, values, priors, **params)
+    out["scores"] = s
     th = {**THRESHOLDS, **(priors or {}).get("thresholds", {})}
+    out["available"] = np.any(np.stack([np.isfinite(v) & np.isfinite(th[k])
+                                          for k, v in s.items()]), axis=0)
     # lowest priority first, so a spike overwrites an autocorrelation flag, which
     # overwrites a drift — the same precedence as before
     for name, pheno in (("drift", PHENO_DRIFT), ("acf", PHENO_ACF), ("spike", PHENO_SPIKE)):
-        x = np.nan_to_num(s[name], nan=0.0)
-        hit = x >= th[name]
-        out["anomaly"][hit] = 1
-        out["phenotype"][hit] = pheno
-        out["magnitude"][hit] = x[hit]
-        out["severity"] = np.maximum(out["severity"], np.minimum(x / (2.0 * th[name]), 1.0))
+        x = s[name]
+        fired = hit(x, th[name])
+        out["anomaly"][fired] = 1
+        out["phenotype"][fired] = pheno
+        out["magnitude"][fired] = x[fired]
+        out["severity"][fired] = excess(x, th[name])[fired]
     return out
 
 

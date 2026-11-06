@@ -3,7 +3,7 @@
 State 0 is the calm regime, state 1 a volatile one (an autonomic-struggle regime). Both
 emit z as a Student-t with mean 0 — state 0 at unit scale, state 1 at `state1_var_mult`
 times the variance — so state 1 is a pure, SUSTAINED volatility regime. The t tails
-(nu fitted on the patient's first worn day, `priors["nu"]`) let a single surge stay in
+(nu and scale fitted from the patient's past, `priors["nu"]`/`tail_scale`) let a single surge stay in
 the calm state; isolated spikes are the Kalman detector's job. Sustained mean offsets
 are left to BOCPD / Kalman / drift.
 
@@ -14,7 +14,7 @@ and b = 1/dwell_1, and the transition over an elapsed dt is exact in closed form
     P11 = a/(a+b) + b/(a+b) e^{-(a+b)dt}        P10 = 1 - P11
 
 so a long gap relaxes toward the stationary mix [b, a]/(a+b) on its own and a short
-one keeps continuity — no reset, no array-step assumption.
+one keeps continuity within a chunk. H8 chunk boundaries reset the state mix.
 
 Only the FORWARD filter P(state 1 | z up to t) is used. The previous version fitted
 transitions by EM on the whole chunk and decoded with Viterbi and forward–backward, so
@@ -25,6 +25,8 @@ calibrated threshold.
 """
 
 import numpy as np
+from scipy.special import expit
+from wearable.cpd._contracts import series, positive, hit, excess
 
 DEFAULTS = {
     "dwell_normal_min": 1440.0,   # mean stay in the calm state
@@ -37,24 +39,32 @@ PHENOTYPE = "HMM_State_Transition"
 
 def score(time, values, priors=None, **params):
     p = {**DEFAULTS, **params}
-    t, z = np.asarray(time, float), np.asarray(values, float)
+    t, z, chunk = series(time, values, priors)
+    positive(**p)
+    if p["state1_var_mult"] <= 1:
+        raise ValueError("state1_var_mult must exceed 1")
     a, b = 1.0 / p["dwell_normal_min"], 1.0 / p["dwell_volatile_min"]
     s = a + b
     v1 = float(p["state1_var_mult"])
-    nu = float((priors or {}).get("nu", 200.0))
+    nu = np.broadcast_to(np.asarray((priors or {}).get("nu", 200.0), float), z.shape)
+    scale = np.broadcast_to(np.asarray((priors or {}).get("tail_scale", 1.0), float), z.shape)
+    if np.any(~np.isfinite(nu)) or np.any(nu <= 2) or np.any(~np.isfinite(scale)) or np.any(scale <= 0):
+        raise ValueError("HMM requires finite nu > 2 and positive tail scales")
     # log-likelihood ratio of volatile vs calm, both Student-t(nu): scale sqrt(v1) vs 1
-    ll = lambda x: (-0.5 * np.log(v1) - (nu + 1) / 2 * (np.log1p(x * x / (nu * v1))
-                                                         - np.log1p(x * x / nu)))
+    ll = lambda x, df: (-0.5 * np.log(v1) - (df + 1) / 2 * (np.log1p(x * x / (df * v1))
+                                                         - np.log1p(x * x / df)))
     pv = np.full(len(z), np.nan)
     p1, prev = a / s, None                   # start from the stationary mix
     for i in range(len(z)):
         if not np.isfinite(z[i]):
             continue
-        if prev is not None:
+        if prev is not None and chunk[i] != chunk[prev]:
+            p1 = a / s
+        elif prev is not None:
             e = np.exp(-s * (t[i] - t[prev]))
             p1 = p1 * (a / s + b / s * e) + (1 - p1) * (a / s) * (1 - e)
-        lo = np.log(p1) - np.log1p(-p1) + ll(z[i])        # posterior log-odds
-        p1 = min(max(1.0 / (1.0 + np.exp(-lo)), 1e-15), 1 - 1e-15)
+        lo = np.log(p1) - np.log1p(-p1) + ll(z[i] / scale[i], nu[i])
+        p1 = float(np.clip(expit(lo), 1e-15, 1 - 1e-15))
         pv[i] = p1
         prev = i
     return {"volatile": _logit(pv)}
@@ -75,18 +85,20 @@ def detect(time, values, priors=None, **params):
     if n < 2:
         return out
     lo = score(time, values, priors, **params)["volatile"]
+    out["scores"] = {"volatile": lo}
     pv = np.where(np.isfinite(lo), 1.0 / (1.0 + np.exp(-np.nan_to_num(lo))), 0.0)
     th = {**THRESHOLDS, **(priors or {}).get("thresholds", {})}["volatile"]
-    hit = np.nan_to_num(lo, nan=-np.inf) >= th
-    out["anomaly"] = hit.astype(int)
+    out["available"] = np.isfinite(lo) & np.isfinite(th)
+    fired = hit(lo, th)
+    out["anomaly"] = fired.astype(int)
     out["magnitude"] = pv
-    out["severity"] = pv
-    out["phenotype"] = np.where(hit, PHENOTYPE, "normal").astype(object)
+    out["severity"] = excess(lo, th)
+    out["phenotype"] = np.where(fired, PHENOTYPE, "normal").astype(object)
     return out
 
 
 # --- registry metadata (auto-discovered; see wearable/registry.py) ---
-LABEL = "Two-state Gaussian HMM"
+LABEL = "Two-state Student-t forward HMM"
 PHENOTYPES = (
     'HMM_State_Transition',
 )

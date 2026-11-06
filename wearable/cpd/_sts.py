@@ -70,6 +70,7 @@ import warnings
 
 import numpy as np
 from scipy.stats import t as student_t
+from wearable.cpd._contracts import positive
 
 DEFAULTS = {
     "grid_min": 10.0,     # the model's time step: the channel's cadence
@@ -101,8 +102,13 @@ def fit(stamp, value, state, cfg):
     if value.size < _MIN_OBS:
         return None
     step = float(cfg["grid_min"])
+    positive(grid_min=step, maxiter=cfg["maxiter"], min_days=cfg["min_days"])
     origin = stamp[0]
     j = np.round(_minutes(stamp, origin) / step).astype(int)
+    # One collision rule for both measurements and covariates: keep the last row.
+    _, reverse = np.unique(j[::-1], return_index=True)
+    keep = np.sort(len(j) - 1 - reverse)
+    j, stamp, value, state = j[keep], stamp[keep], value[keep], state[keep]
     n = int(j[-1]) + 1
     y = np.full(n, np.nan)
     y[j] = np.log(value)                               # last reading in a cell wins
@@ -128,11 +134,17 @@ def fit(stamp, value, state, cfg):
             warnings.simplefilter("ignore")
             res = UnobservedComponents(y, **kw).fit(disp=False, method="lbfgs",
                                                     maxiter=int(cfg["maxiter"]))
+            if not res.mle_retvals.get("converged", False) or not np.isfinite(res.params).all():
+                return None
             e = np.asarray(res.standardized_forecasts_error[0])
     except Exception:
         return None
-    e = e[np.isfinite(e)][res.loglikelihood_burn:]
-    nu = float(np.clip(student_t.fit(e, floc=0.0)[0], 3.0, 200.0)) if e.size > 30 else 200.0
+    observed = np.isfinite(y) & (np.arange(len(y)) >= res.loglikelihood_burn)
+    e = e[np.isfinite(e) & observed]
+    try:
+        nu = float(np.clip(student_t.fit(e, floc=0.0)[0], 3.0, 200.0)) if e.size > 30 and np.std(e) > 1e-8 else 200.0
+    except (ValueError, RuntimeError, FloatingPointError):
+        return None
     params = dict(zip(res.model.param_names, map(float, res.params)))
     return {"res": res, "model": "full" if seasonal else "reduced", "nu": nu,
             "exog": cols, "origin": origin, "end": origin + np.timedelta64(int((n - 1) * step * 60), "s"),
@@ -150,6 +162,9 @@ def simulate(f, hist_stamp, hist_state, worn_needed_min, cfg, seed=0):
     from wearable.cpd._whiten import ACTIVE, SLEEP
 
     res, step = f["res"], f["step"]
+    positive(worn_needed_min=worn_needed_min, reading_min=cfg.get("reading_min", step))
+    if not len(hist_stamp):
+        raise ValueError("STS simulation needs nonempty history")
     rs = np.random.RandomState(seed)
     end = f["end"]
     hist_stamp = np.asarray(hist_stamp, "datetime64[ns]")
@@ -183,6 +198,8 @@ def simulate(f, hist_stamp, hist_state, worn_needed_min, cfg, seed=0):
                                           measurement_shocks=shocks,
                                           random_state=rs)).reshape(-1)
         val = np.clip(np.exp(sim[pos]), cfg["lo"], cfg["hi"])
+        if not np.isfinite(val).all():
+            raise ValueError("STS produced nonfinite simulation")
         out_s.append(base_stamp + k * (span + 1) * _DAY)      # one empty day between blocks
         out_v.append(val)
         out_k.append(base_state)

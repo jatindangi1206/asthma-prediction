@@ -6,7 +6,8 @@ labelled afterwards), and a heavy-tailed burst does not by itself collapse the r
 
 Time-aware hazard: changes are taken to arrive as a Poisson process in clock time, so
 the probability that one happened since the previous reading is 1 - exp(-dt/lambda).
-A long gap therefore raises the prior of a change on its own, a short one barely.
+A within-chunk gap raises the prior of a change. H8 boundaries restart inference
+instead of diagnosing a change that may have occurred during nonwear.
 
 A new segment's first reading is scored under the PRIOR predictive. (With the textbook
 recursion, which scores it under the old runs' predictive, P(r_t = 0) equals the hazard
@@ -26,6 +27,7 @@ BOCPD_Mean_Shift, a larger spread change BOCPD_Variance_Change.
 
 import numpy as np
 from scipy.special import gammaln
+from wearable.cpd._contracts import series, positive, hit, excess
 
 DEFAULTS = {
     "lambda_min": 4320.0,      # expected clock time between changes (3 days)
@@ -55,12 +57,17 @@ def _post(x, mu, k, a, b):
 
 def score(time, values, priors=None, **params):
     p = {**DEFAULTS, **params}
-    t, z = np.asarray(time, float), np.asarray(values, float)
+    t, z, chunk = series(time, values, priors)
+    positive(lambda_min=p["lambda_min"], window_min=p["window_min"], max_hyp=p["max_hyp"])
+    if int(p["max_hyp"]) != p["max_hyp"]:
+        raise ValueError("max_hyp must be an integer")
     cp = np.full(len(z), np.nan)
     lp = np.empty(0); start = np.empty(0)
     mu = k = a = b = np.empty(0)
     prev_t = None
     for i in range(len(z)):
+        if i and chunk[i] != chunk[i - 1]:
+            lp = np.empty(0)  # H8: do not infer a timed change inside nonwear
         x = z[i]
         if not np.isfinite(x):
             continue
@@ -82,7 +89,9 @@ def score(time, values, priors=None, **params):
         mu, k, a, b = np.r_[m0, m2], np.r_[k0, k2], np.r_[a0, a2], np.r_[b0, b2]
         top = lp.max()
         lp = lp - (top + np.log(np.exp(lp - top).sum()))
-        keep = lp >= max(_PRUNE, np.sort(lp)[-int(p["max_hyp"])] if lp.size > p["max_hyp"] else _PRUNE)
+        chosen = np.argsort(-lp, kind="stable")[:int(p["max_hyp"])]
+        keep = np.zeros(len(lp), bool)
+        keep[chosen] = lp[chosen] >= _PRUNE
         if not keep.all():
             lp, start, mu, k, a, b = lp[keep], start[keep], mu[keep], k[keep], a[keep], b[keep]
             top = lp.max()
@@ -106,16 +115,19 @@ def detect(time, values, priors=None, **params):
     if N < 2:
         return out
     lo = score(t, z, priors, **params)["cp"]
+    out["scores"] = {"cp": lo}
     th = {**THRESHOLDS, **(priors or {}).get("thresholds", {})}["cp"]
-    hit = np.nan_to_num(lo, nan=-np.inf) >= th
-    out["anomaly"] = hit.astype(int)
-    out["severity"] = np.where(np.isfinite(lo), 1.0 / (1.0 + np.exp(-np.nan_to_num(lo))), 0.0)
+    out["available"] = np.isfinite(lo) & np.isfinite(th)
+    fired = hit(lo, th)
+    out["anomaly"] = fired.astype(int)
+    out["severity"] = excess(lo, th)
     w = p["window_min"]
     pheno, mag = PHENO_MEAN, 0.0
-    for i in np.flatnonzero(hit):
-        if i == 0 or not hit[i - 1]:                     # a run's first reading
-            old = z[(t > t[i] - 2 * w) & (t <= t[i] - w)]
-            recent = z[(t > t[i] - w) & (t <= t[i])]
+    chunk = np.asarray((priors or {}).get("chunk", np.zeros(N, int)))
+    for i in np.flatnonzero(fired):
+        if i == 0 or not fired[i - 1] or chunk[i] != chunk[i - 1]:
+            old = z[(t > t[i] - 2 * w) & (t <= t[i] - w) & (chunk == chunk[i])]
+            recent = z[(t > t[i] - w) & (t <= t[i]) & (chunk == chunk[i])]
             old, recent = old[np.isfinite(old)], recent[np.isfinite(recent)]
             if old.size >= 2 and recent.size >= 2:
                 d_mean = abs(recent.mean() - old.mean())
