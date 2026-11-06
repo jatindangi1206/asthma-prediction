@@ -113,6 +113,8 @@ for later verification, not a test result. No finite static review guarantees th
 all bugs have been found, and this report does not estimate clinical harm or metric
 inflation from unavailable data.
 
+\textbf{How to use the categories.} The confirmed-defect section is the implementation repair list. The design/validation section is a decision and evidence agenda, and the verification section is an assurance checklist. Mixed findings are conservatively retained in the decision section rather than promoted wholesale to confirmed defects. All original locations, conditions, consequences, repair options and acceptance checks are retained.
+
 \textbf{Severity ranks by potential damage to conclusions and processing.}
 S1 (critical) can invalidate causal claims or silently change/reuse an experimental
 input. S2 (major) can systematically corrupt a detector, null, alarm timing or
@@ -121,43 +123,47 @@ S4 (minor) affects robustness, reporting or maintenance. These are engineering
 priorities, not measured clinical severity. Within a tier, fix order depends on the
 branches actually used.
 
-\section{Ranked register}
+\section{Register by evidence category and severity}
+Issue IDs are unchanged. Each category is sorted from S1 to S4; severity does not convert an unvalidated concern into a confirmed defect.
 \small
-\begin{longtable}{@{}p{0.08\textwidth}p{0.09\textwidth}p{0.08\textwidth}p{0.68\textwidth}@{}}
+\begin{longtable}{@{}p{0.08\textwidth}p{0.09\textwidth}p{0.09\textwidth}p{0.64\textwidth}@{}}
 \toprule ID & Rank & Evidence & Issue \\
 \midrule\endhead
+\multicolumn{4}{@{}l}{\textbf{Confirmed implementation defects}} \\
 C01 & S1 & D & Shuffle calibration reads beyond its activation timestamp \\
 C02 & S1 & D & Raw filler rows hide observation gaps \\
 C03 & S1 & D & Channel metadata and feature-coverage bookkeeping are wrong \\
 C04 & S1 & D & CPD cache omits shared code and side-input contents \\
 C05 & S1 & D & Future sleep availability changes earlier drift windows \\
-C06 & S1 & D/R & Upstream lookahead remains in CPD inputs \\
 C07 & S2 & D & Held HR output crosses resets and settling boundaries \\
 C08 & S2 & D & Shuffle null replaces original chunks with calendar days \\
-C09 & S2 & D/R & Calibration measures events but permits nearly continuous alarms \\
 C10 & S2 & D & Missing scores can become alarms at nonpositive thresholds \\
 C11 & S2 & D & KCPD backdates scheduled results and revises earlier outputs \\
-C12 & S2 & D/R & Whitening carries latent states across changed coordinates \\
-C13 & S2 & D/R & Kalman CUSUM carries evidence indefinitely across gaps \\
 C14 & S2 & D & Consecutive nightly drift alarms are suppressed \\
 C15 & S2 & D & Drift loses/delays nights and collapses simultaneous verdicts \\
-C16 & S2 & R & Drift's analytic budget does not calibrate its actual process \\
 C17 & S2 & D/V & STS accepts unreliable fits and has incomplete fallback handling \\
-C18 & S2 & D/R & STS null support is conditioned on upstream output availability \\
-C30 & S2 & V & Existing checks do not establish the advertised guarantees \\
 C32 & S2 & D & Long nonwear resumes with an empty baseline but remains armed \\
 C19 & S3 & D & Partial-bin closure depends on later input or end-of-file \\
-C20 & S3 & D/R & Worn-time and sleep-coverage accounting use nominal counts \\
-C21 & S3 & D/R & Tail fitting discards scale; HMM uses a fixed scale thereafter \\
-C22 & S3 & D/R & Calibration exclusions/fallbacks can include abnormal or old history \\
-C23 & S3 & D/R & Severity values are not comparable across detectors \\
 C24 & S3 & D & Daily event counts and time labels disagree with CPD accounting \\
-C25 & S3 & D/R & BOCPD gap semantics, phenotype and pruning need explicit bounds \\
-C26 & S3 & R & STS synthetic fidelity and innovation-tail assignment are unverified \\
 C27 & S3 & D/V & Invalid settings and partially malformed inputs are not rejected \\
 C28 & S3 & D/V & A patient error can abort a cohort and leave a running artifact \\
 C29 & S3 & D/V & Calibration reports can compare different inputs and exposure sets \\
 C33 & S3 & D/V & Missing one state source silently discards the other \\
+\multicolumn{4}{@{}l}{\textbf{Design decisions and empirical validation}} \\
+C06 & S1 & D/R & Upstream lookahead remains in CPD inputs \\
+C09 & S2 & D/R & Calibration measures events but permits nearly continuous alarms \\
+C12 & S2 & D/R & Whitening carries latent states across changed coordinates \\
+C13 & S2 & D/R & Kalman CUSUM carries evidence indefinitely across gaps \\
+C16 & S2 & R & Drift's analytic budget does not calibrate its actual process \\
+C18 & S2 & D/R & STS null support is conditioned on upstream output availability \\
+C20 & S3 & D/R & Worn-time and sleep-coverage accounting use nominal counts \\
+C21 & S3 & D/R & Tail fitting discards scale; HMM uses a fixed scale thereafter \\
+C22 & S3 & D/R & Calibration exclusions/fallbacks can include abnormal or old history \\
+C23 & S3 & D/R & Severity values are not comparable across detectors \\
+C25 & S3 & D/R & BOCPD gap semantics, phenotype and pruning need explicit bounds \\
+C26 & S3 & R & STS synthetic fidelity and innovation-tail assignment are unverified \\
+\multicolumn{4}{@{}l}{\textbf{Verification and observability gaps}} \\
+C30 & S2 & V & Existing checks do not establish the advertised guarantees \\
 C31 & S4 & D/V & Provenance and output omit important diagnostic state \\
 \bottomrule
 \end{longtable}
@@ -184,7 +190,9 @@ is a model-selection question. Reintroducing full-record EM or Viterbi would res
 lookahead rather than repair it. Any supervised choice of detector settings must
 respect training/validation patient boundaries.
 
-\section{Critical issues}
+\section{Confirmed implementation defects}
+
+These 19 findings identify a concrete source-visible implementation or contract defect. Confirmation here means a demonstrated code path or counterexample, not an executed reproduction or measured clinical impact. Fix the specified defect and run its acceptance check. The exact repair can still require an implementation choice; it must preserve the pipeline contract.
 
 \finding{C01}{S1}{D}{Shuffle calibration exceeds its historical cutoff}
 \loc{wearable/steps/detect.py}{222--237}
@@ -267,23 +275,6 @@ only state observations available then, with a declared minimum coverage policy.
 \checklater Append the first sleep observation several days after arming; all
 previous verdicts and their baselines must remain unchanged.
 
-\finding{C06}{S1, conditional on input}{D/R}{Causal detection cannot repair leaked inputs}
-\loc{wearable/experiment.py}{270--287}
-\loc{wearable/steps/detect.py}{374--394}
-The default smoothing recipe is \code{gammadglm}; the existing causality audit
-documents whole-frame parameter fitting in nine smoothers. Detection accepts those
-artifacts without a causal-status check. Their early residuals, and histories used
-to fit whitening/thresholds, can already depend on later observations. This is an
-upstream issue at the CPD boundary, not evidence that every detector recurrence is
-noncausal. It particularly affects onset interpretation.
-\repair Record input causal status and calibration interval in manifests; distinguish
-retrospective comparisons from prospective-valid branches. Use causal initialization
-or a fixed past calibration for the smoother before certifying the chain.
-\checklater Full-chain prefix consistency must include recomputing the upstream
-transform, rather than truncating a residual computed on a full recording.
-
-\section{Major algorithm and calibration issues}
-
 \finding{C07}{S2}{D}{HR output holding leaks old flags across a reset}
 \loc{wearable/cpd/_whiten.py}{302--313}
 \loc{wearable/steps/detect.py}{324--359}
@@ -311,23 +302,6 @@ block joins. Calibrate with the same reset and availability rules as real infere
 document which original continuity is intentionally destroyed.
 \checklater Map sampled days back to original rows and verify every internal reset,
 all synthetic joins, settling masks and eligible KCPD windows.
-
-\finding{C09}{S2}{D/R}{Event-rate calibration admits an always-on detector}
-\loc{wearable/cpd/_whiten.py}{349--370}
-\loc{wearable/steps/detect.py}{241--250}
-Threshold choice constrains rising-edge counts only. A threshold producing one long
-alarm throughout 60 worn days can meet a budget even though virtually all readings
-are flagged. The ``at every higher threshold'' envelope helps reject low thresholds
-when intermediate thresholds produce many events, but a flat/degenerate score has
-no such protection. For a constant finite score, the minimum candidate can be
-accepted whenever one event fits the budget. Also, each statistic is calibrated in
-isolation; the final detector and ensemble are not replayed and checked on the null.
-\repair Specify an event lifecycle, occupancy/duration constraint and admissible
-threshold domain. Record both null event rate and occupancy, and replay final
-detector/ensemble outputs rather than equating a low onset count with useful alarms.
-\checklater Constant scores, sustained plateaus, isolated spikes and correlated
-streams must not yield near-continuous accepted alarms without an explicit state
-interpretation. Verify final OR behavior, not just per-stream thresholds.
 
 \finding{C10}{S2}{D}{Unavailable statistics become alarms at zero/negative thresholds}
 \loc{wearable/cpd/kcpd.py}{123--129}
@@ -359,6 +333,196 @@ backwards. Reset/expire held statistics at declared gaps.
 \checklater Use jittered arrivals, a long silent interval and many cuts inside that
 interval; already-published scores must be immutable.
 
+\finding{C14}{S2}{D}{Consecutive nightly alarms collapse into one}
+\loc{wearable/cpd/drift.py}{126--137 and 148--154}
+The CUSUM restarts after a verdict, but its above-threshold score remains held.
+If the next night independently alarms, the held Boolean never falls; rising-edge
+extraction deletes that second verdict. This contradicts once-per-verdict output.
+\repair Return explicit verdict indices/IDs and one impulse for each alarmed night;
+keep held magnitude separate from event identity.
+\checklater Two and three consecutive alarmed nights must produce two and three
+distinct verdict events, even with no below-threshold score between them.
+
+\finding{C15}{S2}{D}{Night enumeration and delayed verdict mapping lose information}
+\loc{wearable/cpd/drift.py}{76--91 and 112--137}
+Only calendar dates containing readings are enumerated. An evening's recorded sleep
+can yield a valid window ending on a date with no readings, but that night is never
+examined. Other nights are delayed to the first armed reading, potentially days
+later. Several nights can map to one index, where the held-score writer overwrites
+earlier verdicts. Their CUSUM/baseline updates still happened internally, so emitted
+output no longer describes the sequence processed. No maximum verdict delay exists.
+\repair Generate candidate night-end dates from the window support; keep separate
+night time, availability time and publication time. Expire stale verdicts or retain
+them as explicit events rather than silently overwriting one row.
+\checklater Recorded evening sleep followed by a no-reading next day; multiple
+nights completing before the next armed reading; recovery after extended nonwear.
+
+\finding{C17}{S2}{D/V}{STS fit health is unchecked and fallback is incomplete}
+\loc{wearable/cpd/_sts.py}{126--139 and 178--191}
+\loc{wearable/steps/detect.py}{155--187}
+The likelihood fit suppresses warnings and accepts returned parameters without
+checking optimizer convergence, finite values or useful variance estimates.
+The exception guard covers the main fit but not the later Student-t fit or
+simulation. Those failures escape instead of returning the documented shuffle
+fallback. A finite but unusable fit can generate degenerate nulls and bad thresholds.
+The shared initial tail fit in \code{_whiten.py:221--224} is likewise unguarded.
+\repair Validate fits and simulations explicitly; guard the whole calibration
+operation with narrowly classified errors; record fallback reason and fit diagnostics.
+Do not silently convert a numerical failure into a normal detector result.
+\checklater Nonconverged optimizer, constant series, near-zero variances, invalid
+tail fits and simulation exceptions must produce declared fallback/failure status.
+
+\finding{C32}{S2}{D}{A long absence leaves an armed detector with no fitted baseline}
+\loc{wearable/cpd/_whiten.py}{194--217 and 235--236}
+\loc{wearable/cpd/_whiten.py}{64--69 and 126--127}
+Once arming has occurred it is never revoked. After an absence longer than
+\code{baseline_days}, the historical slice at the next refit can be empty. The
+fewer-than-ten fallback selects the same empty slice; it does not recover a valid
+baseline. Robust fitting then returns center 0 and scale 1, with no OU correlation.
+For a raw HR input near 80, this yields innovations near 80 rather than a meaningful
+patient-standardized score. The patient becomes eligible again after only the short
+settling interval, despite having no current fitted baseline. Earlier detector
+memory remains in use. Threshold recalibration can resample arbitrarily old history
+through C22. This differs from retaining state across a small gap.
+\repair Require sufficient eligible fitting history after each material absence.
+Freeze an explicitly valid historical fit with a staleness policy, or re-enter
+calibration/unarmed status; never substitute generic center/scale while reporting
+ordinary armed inference.
+\checklater An armed raw-channel patient disappears for more than 14 days and
+returns with unchanged physiology. Status and parameters must follow the declared
+re-entry policy and must not produce default-zero-centered pseudo-anomalies.
+
+\finding{C19}{S3}{D}{A bin's closure time is inferred retrospectively}
+\loc{wearable/cpd/_whiten.py}{302--313}
+\loc{wearable/cpd/kcpd.py}{50--59}
+Bins are timestamped at their final observed row, including the last incomplete
+bin at end-of-file. That row is not known to be the last until the bin closes or a
+later arrival establishes it. Truncating within a bin publishes a different partial
+median than extending the input. Even a completed sparse bin's last arrival can
+precede its known clock closure. This is an availability-time defect, not a centered
+future median at every row. The selftest explicitly excludes the final bin near cuts.
+\repair Emit only closed bins at a declared clock boundary, or label partial outputs
+as provisional and exclude them from causal claims. Apply the same rule to KCPD's
+optional second binning layer.
+\checklater Prefix cuts at every offset in a five-minute bin, including sparse bins
+and a closure with no new observation.
+
+\finding{C24}{S3}{D}{Event and duration definitions differ across pipeline stages}
+\loc{wearable/steps/detect.py}{501--517}
+\loc{wearable/steps/join.py}{166--172}
+\loc{wearable/cpd/_whiten.py}{285--288}
+Detection counts runs after deleting unarmed readings, intentionally merging across
+settling windows; it also merges across long gaps if flags remain high. Join counts
+on the full rows separately within each day: filler/unarmed zeros split events and
+midnight starts another daily bout. Columns ending in \code{_minutes} sum flagged
+rows rather than durations. HR bin holding expands a one-bin verdict onto several
+rows, so drift is no longer a single-row impulse on the original grid. These are
+different estimands unless explicitly named.
+\repair Define event IDs and exposure/duration once, preserve them through mapping,
+and choose whether a daily count means new event onsets or events active that day.
+Rename sample counts or implement a documented bounded duration calculation.
+\checklater One event across midnight, a gap and a settle interval; check global
+counts, daily counts, impulses and durations against the declared definitions.
+
+\finding{C27}{S3}{D/V}{Input and setting validation does not protect numerical invariants}
+\loc{wearable/steps/detect.py}{64--90 and 443--475}
+\loc{wearable/cpd/drift.py}{55--59}
+Settings names are checked, not numerical domains. Empty/duplicate method lists,
+nonpositive/nonfinite budgets, invalid dwell times, zero stride, zero permutations,
+nonpositive hazard scale, invalid direction or impossible coverage can crash or
+silently misbehave. A high requested analytic drift rate may put the root outside
+the fixed bracket; \code{cusum_k=0} divides by zero. Non-HRV channels without a CPD
+settings block inherit HRV cadence. Existing chunk columns with some NaNs are trusted;
+timestamps, strict ordering after duplicates, infinity, and array lengths are not
+validated at the public detector interface. A detector lacking both calibration
+hooks has no threshold entry when the pipeline invokes it.
+\repair Validate domains, unique methods, channel support, timestamps, finite
+raw/transform alignment and detector calibration capabilities before creating an
+artifact. Reject unsupported cases with actionable errors, or implement declared
+fallbacks. Do not infer that ingestibility means CPD settings are appropriate.
+\checklater A compact invalid-input matrix covering each listed invariant, including
+drift-only, an empty ensemble and a newly discovered detector with no score hook.
+
+\finding{C28}{S3}{D/V}{One calibration failure can abort the entire cohort}
+\loc{wearable/steps/detect.py}{398--408 and 476--495}
+\code{_patient_job} does not catch per-patient failures; materializing the process
+map propagates the exception and discards the usable returned results for writing.
+Only the all-empty-output case marks the artifact failed. Other exceptions can leave
+its manifest marked running. Global warning suppression hides numerical diagnostics.
+Conversely an unarmable patient with at least two readings returns a blank output
+and counts as a processed patient, without an explicit unarmable status.
+\repair Preserve patient-level success/failure/unarmable reasons and a declared
+cohort completeness policy; mark the artifact failed on any unhandled exception.
+Scope warnings narrowly and retain diagnostics. Expose worker count rather than
+always creating almost one worker per CPU for expensive STS tasks.
+\checklater One patient fails while others succeed; verify manifest status, failure
+table, retained outputs, and unchanged modelling population/missingness policy.
+
+\finding{C29}{S3}{D/V}{Calibration reports can compare different computations}
+\loc{scripts/cpd_calibration_compare.py}{35--47 and 55--87}
+The ``latest'' selection filters ensemble, channel suffix, budget and calibration,
+but not \code{on}, smoother, input artifact identity, code version or cohort/support.
+It can compare STS residual detection with a newer raw shuffle run. The reader
+hardcodes CSV despite configurable artifact format. Exposure is computed from
+original armed rows and nominal cadence, whereas thresholds used binned support
+(C20). Labels such as ``time flagged'' are row fractions, not guaranteed elapsed-time
+fractions. Reported differences cannot all be attributed to calibration choice.
+\repair Require a matched comparison specification and use the artifact table
+reader, keyed input identity and stored exposure definition. Print mismatches rather
+than selecting an arbitrary newest run.
+\checklater Multiple raw/residual runs at the same budget, different smoothers and
+CSV/parquet artifacts; only truly matched pairs may be compared.
+
+\finding{C33}{S3}{D/V}{State inputs use an all-or-nothing availability rule}
+\loc{wearable/steps/detect.py}{259--267 and 298--302}
+If either sleep or steps file is absent, \code{_flags} returns None and discards the
+other source too. Available sleep flags therefore do not support nightly sleep
+windows when activity flags are absent; available activity is likewise ignored if
+sleep is missing. No per-patient reason is emitted. An empty or poorly covered file
+is a different case: state classification can become UNKNOWN, but the presence
+of one sleep anywhere switches drift away from its fallback globally (C05).
+\repair Load sources independently and define partially observed states explicitly.
+Sleep-only information can identify sleep without asserting wake/rest/activity.
+Record state coverage and fallback reasons separately from file existence.
+\checklater All four sleep/steps file-presence combinations plus empty and sparse
+files; usable information must be retained without inventing the absent state.
+
+\section{Design decisions and empirical validation}
+
+These 12 findings are not a blanket list of confirmed CPD bugs. They concern intended semantics, model assumptions, conditional upstream limitations or statistical adequacy. For mixed D/R entries, the described source behavior is established, but its scientific acceptability or the appropriate replacement is not established by static inspection. Decide the required behavior or gather independent evidence before changing the algorithm. C25 also contains a narrow source-visible tied-pruning cap discrepancy; that subpoint can be repaired separately without deciding the BOCPD model or gap policy.
+
+\finding{C06}{S1, conditional on input}{D/R}{Causal detection cannot repair leaked inputs}
+\loc{wearable/experiment.py}{270--287}
+\loc{wearable/steps/detect.py}{374--394}
+The default smoothing recipe is \code{gammadglm}; the existing causality audit
+documents whole-frame parameter fitting in nine smoothers. Detection accepts those
+artifacts without a causal-status check. Their early residuals, and histories used
+to fit whitening/thresholds, can already depend on later observations. This is an
+upstream issue at the CPD boundary, not evidence that every detector recurrence is
+noncausal. It particularly affects onset interpretation.
+\repair Record input causal status and calibration interval in manifests; distinguish
+retrospective comparisons from prospective-valid branches. Use causal initialization
+or a fixed past calibration for the smoother before certifying the chain.
+\checklater Full-chain prefix consistency must include recomputing the upstream
+transform, rather than truncating a residual computed on a full recording.
+
+\finding{C09}{S2}{D/R}{Event-rate calibration admits an always-on detector}
+\loc{wearable/cpd/_whiten.py}{349--370}
+\loc{wearable/steps/detect.py}{241--250}
+Threshold choice constrains rising-edge counts only. A threshold producing one long
+alarm throughout 60 worn days can meet a budget even though virtually all readings
+are flagged. The ``at every higher threshold'' envelope helps reject low thresholds
+when intermediate thresholds produce many events, but a flat/degenerate score has
+no such protection. For a constant finite score, the minimum candidate can be
+accepted whenever one event fits the budget. Also, each statistic is calibrated in
+isolation; the final detector and ensemble are not replayed and checked on the null.
+\repair Specify an event lifecycle, occupancy/duration constraint and admissible
+threshold domain. Record both null event rate and occupancy, and replay final
+detector/ensemble outputs rather than equating a low onset count with useful alarms.
+\checklater Constant scores, sustained plateaus, isolated spikes and correlated
+streams must not yield near-continuous accepted alarms without an explicit state
+interpretation. Verify final OR behavior, not just per-stream thresholds.
+
 \finding{C12}{S2}{D/R}{Whitening refits leave the latent state in old coordinates}
 \loc{wearable/cpd/_whiten.py}{203--228}
 Hourly centers/scales and state corrections are recomputed at each refit, changing
@@ -388,30 +552,6 @@ then recalibrate that same recurrence. Do not reset only at inference.
 \checklater Separate two subthreshold excursions by a long gap; check whether their
 combination is permitted by the chosen policy. Test recovery after a large alarm.
 
-\finding{C14}{S2}{D}{Consecutive nightly alarms collapse into one}
-\loc{wearable/cpd/drift.py}{126--137 and 148--154}
-The CUSUM restarts after a verdict, but its above-threshold score remains held.
-If the next night independently alarms, the held Boolean never falls; rising-edge
-extraction deletes that second verdict. This contradicts once-per-verdict output.
-\repair Return explicit verdict indices/IDs and one impulse for each alarmed night;
-keep held magnitude separate from event identity.
-\checklater Two and three consecutive alarmed nights must produce two and three
-distinct verdict events, even with no below-threshold score between them.
-
-\finding{C15}{S2}{D}{Night enumeration and delayed verdict mapping lose information}
-\loc{wearable/cpd/drift.py}{76--91 and 112--137}
-Only calendar dates containing readings are enumerated. An evening's recorded sleep
-can yield a valid window ending on a date with no readings, but that night is never
-examined. Other nights are delayed to the first armed reading, potentially days
-later. Several nights can map to one index, where the held-score writer overwrites
-earlier verdicts. Their CUSUM/baseline updates still happened internally, so emitted
-output no longer describes the sequence processed. No maximum verdict delay exists.
-\repair Generate candidate night-end dates from the window support; keep separate
-night time, availability time and publication time. Expire stale verdicts or retain
-them as explicit events rather than silently overwriting one row.
-\checklater Recorded evening sleep followed by a no-reading next day; multiple
-nights completing before the next armed reading; recovery after extended nonwear.
-
 \finding{C16}{S2}{R}{Drift's analytic threshold does not calibrate its actual statistic}
 \loc{wearable/cpd/drift.py}{50--59 and 114--132}
 The analytic approximation assumes standardized nightly observations of a specified
@@ -425,21 +565,6 @@ The analytic detector is exempt from empirical null-rate reporting.
 state a separate per-eligible-night sensitivity target and validate the approximation.
 \checklater Vary baseline length, missing nights, sleep coverage, heavy tails and
 state availability; measure false verdicts per eligible night and per worn day.
-
-\finding{C17}{S2}{D/V}{STS fit health is unchecked and fallback is incomplete}
-\loc{wearable/cpd/_sts.py}{126--139 and 178--191}
-\loc{wearable/steps/detect.py}{155--187}
-The likelihood fit suppresses warnings and accepts returned parameters without
-checking optimizer convergence, finite values or useful variance estimates.
-The exception guard covers the main fit but not the later Student-t fit or
-simulation. Those failures escape instead of returning the documented shuffle
-fallback. A finite but unusable fit can generate degenerate nulls and bad thresholds.
-The shared initial tail fit in \code{_whiten.py:221--224} is likewise unguarded.
-\repair Validate fits and simulations explicitly; guard the whole calibration
-operation with narrowly classified errors; record fallback reason and fit diagnostics.
-Do not silently convert a numerical failure into a normal detector result.
-\checklater Nonconverged optimizer, constant series, near-zero variances, invalid
-tail fits and simulation exceptions must produce declared fallback/failure status.
 
 \finding{C18}{S2}{D/R}{STS and nightly drift are restricted by transformed availability}
 \loc{wearable/steps/detect.py}{288--308 and 151--154}
@@ -455,43 +580,6 @@ Define which detector needs which support; generate raw STS histories first, the
 apply the actual transform and eligibility policy once.
 \checklater Give two transforms different NaN masks over identical raw observations;
 raw nightly baselines should agree unless the experiment explicitly varies support.
-
-\finding{C32}{S2}{D}{A long absence leaves an armed detector with no fitted baseline}
-\loc{wearable/cpd/_whiten.py}{194--217 and 235--236}
-\loc{wearable/cpd/_whiten.py}{64--69 and 126--127}
-Once arming has occurred it is never revoked. After an absence longer than
-\code{baseline_days}, the historical slice at the next refit can be empty. The
-fewer-than-ten fallback selects the same empty slice; it does not recover a valid
-baseline. Robust fitting then returns center 0 and scale 1, with no OU correlation.
-For a raw HR input near 80, this yields innovations near 80 rather than a meaningful
-patient-standardized score. The patient becomes eligible again after only the short
-settling interval, despite having no current fitted baseline. Earlier detector
-memory remains in use. Threshold recalibration can resample arbitrarily old history
-through C22. This differs from retaining state across a small gap.
-\repair Require sufficient eligible fitting history after each material absence.
-Freeze an explicitly valid historical fit with a staleness policy, or re-enter
-calibration/unarmed status; never substitute generic center/scale while reporting
-ordinary armed inference.
-\checklater An armed raw-channel patient disappears for more than 14 days and
-returns with unchanged physiology. Status and parameters must follow the declared
-re-entry policy and must not produce default-zero-centered pseudo-anomalies.
-
-\section{Moderate issues and model assumptions}
-
-\finding{C19}{S3}{D}{A bin's closure time is inferred retrospectively}
-\loc{wearable/cpd/_whiten.py}{302--313}
-\loc{wearable/cpd/kcpd.py}{50--59}
-Bins are timestamped at their final observed row, including the last incomplete
-bin at end-of-file. That row is not known to be the last until the bin closes or a
-later arrival establishes it. Truncating within a bin publishes a different partial
-median than extending the input. Even a completed sparse bin's last arrival can
-precede its known clock closure. This is an availability-time defect, not a centered
-future median at every row. The selftest explicitly excludes the final bin near cuts.
-\repair Emit only closed bins at a declared clock boundary, or label partial outputs
-as provisional and exclude them from causal claims. Apply the same rule to KCPD's
-optional second binning layer.
-\checklater Prefix cuts at every offset in a five-minute bin, including sparse bins
-and a closure with no new observation.
 
 \finding{C20}{S3}{D/R}{Nominal sample counts are presented as actual time coverage}
 \loc{wearable/cpd/_whiten.py}{185--197 and 331--346}
@@ -561,23 +649,6 @@ magnitude coupled. Do not interpret primary phenotype as a diagnosed cause.
 \checklater Simultaneous stream/detector hits, ties, negative/zero thresholds and
 nonfinite severities must have deterministic, semantically consistent output.
 
-\finding{C24}{S3}{D}{Event and duration definitions differ across pipeline stages}
-\loc{wearable/steps/detect.py}{501--517}
-\loc{wearable/steps/join.py}{166--172}
-\loc{wearable/cpd/_whiten.py}{285--288}
-Detection counts runs after deleting unarmed readings, intentionally merging across
-settling windows; it also merges across long gaps if flags remain high. Join counts
-on the full rows separately within each day: filler/unarmed zeros split events and
-midnight starts another daily bout. Columns ending in \code{_minutes} sum flagged
-rows rather than durations. HR bin holding expands a one-bin verdict onto several
-rows, so drift is no longer a single-row impulse on the original grid. These are
-different estimands unless explicitly named.
-\repair Define event IDs and exposure/duration once, preserve them through mapping,
-and choose whether a daily count means new event onsets or events active that day.
-Rename sample counts or implement a documented bounded duration calculation.
-\checklater One event across midnight, a gap and a settle interval; check global
-counts, daily counts, impulses and durations against the declared definitions.
-
 \finding{C25}{S3}{D/R}{BOCPD gap behavior and phenotype are weaker than their labels}
 \loc{wearable/cpd/bocpd.py}{63--94 and 115--125}
 The recurrence ignores chunk IDs and increases hazard with elapsed time across a
@@ -624,54 +695,9 @@ claiming exact reproducibility or phase fidelity.
 \checklater Colliding samples with conflicting states, long gaps, known seasonal
 phase, variance/tail checks, burst autocorrelation and fresh versus repeated blocks.
 
-\finding{C27}{S3}{D/V}{Input and setting validation does not protect numerical invariants}
-\loc{wearable/steps/detect.py}{64--90 and 443--475}
-\loc{wearable/cpd/drift.py}{55--59}
-Settings names are checked, not numerical domains. Empty/duplicate method lists,
-nonpositive/nonfinite budgets, invalid dwell times, zero stride, zero permutations,
-nonpositive hazard scale, invalid direction or impossible coverage can crash or
-silently misbehave. A high requested analytic drift rate may put the root outside
-the fixed bracket; \code{cusum_k=0} divides by zero. Non-HRV channels without a CPD
-settings block inherit HRV cadence. Existing chunk columns with some NaNs are trusted;
-timestamps, strict ordering after duplicates, infinity, and array lengths are not
-validated at the public detector interface. A detector lacking both calibration
-hooks has no threshold entry when the pipeline invokes it.
-\repair Validate domains, unique methods, channel support, timestamps, finite
-raw/transform alignment and detector calibration capabilities before creating an
-artifact. Reject unsupported cases with actionable errors, or implement declared
-fallbacks. Do not infer that ingestibility means CPD settings are appropriate.
-\checklater A compact invalid-input matrix covering each listed invariant, including
-drift-only, an empty ensemble and a newly discovered detector with no score hook.
+\section{Verification and observability gaps}
 
-\finding{C28}{S3}{D/V}{One calibration failure can abort the entire cohort}
-\loc{wearable/steps/detect.py}{398--408 and 476--495}
-\code{_patient_job} does not catch per-patient failures; materializing the process
-map propagates the exception and discards the usable returned results for writing.
-Only the all-empty-output case marks the artifact failed. Other exceptions can leave
-its manifest marked running. Global warning suppression hides numerical diagnostics.
-Conversely an unarmable patient with at least two readings returns a blank output
-and counts as a processed patient, without an explicit unarmable status.
-\repair Preserve patient-level success/failure/unarmable reasons and a declared
-cohort completeness policy; mark the artifact failed on any unhandled exception.
-Scope warnings narrowly and retain diagnostics. Expose worker count rather than
-always creating almost one worker per CPU for expensive STS tasks.
-\checklater One patient fails while others succeed; verify manifest status, failure
-table, retained outputs, and unchanged modelling population/missingness policy.
-
-\finding{C29}{S3}{D/V}{Calibration reports can compare different computations}
-\loc{scripts/cpd_calibration_compare.py}{35--47 and 55--87}
-The ``latest'' selection filters ensemble, channel suffix, budget and calibration,
-but not \code{on}, smoother, input artifact identity, code version or cohort/support.
-It can compare STS residual detection with a newer raw shuffle run. The reader
-hardcodes CSV despite configurable artifact format. Exposure is computed from
-original armed rows and nominal cadence, whereas thresholds used binned support
-(C20). Labels such as ``time flagged'' are row fractions, not guaranteed elapsed-time
-fractions. Reported differences cannot all be attributed to calibration choice.
-\repair Require a matched comparison specification and use the artifact table
-reader, keyed input identity and stored exposure definition. Print mismatches rather
-than selecting an arbitrary newest run.
-\checklater Multiple raw/residual runs at the same budget, different smoothers and
-CSV/parquet artifacts; only truly matched pairs may be compared.
+These two findings describe missing assurance and diagnostic information. They do not prove that every affected detector output is wrong. Close them through the specified regression coverage, validation and provenance work, rather than treating them as two additional algorithm failures.
 
 \finding{C30}{S2}{V}{The present tests leave the central failure modes uncovered}
 \loc{wearable/selftest.py}{543--578, 580--600 and 627--753}
@@ -710,20 +736,6 @@ documentation; diagnostic artifacts remain sensitive.
 \checklater A known event can be traced from raw support through fit version,
 threshold, score, eligibility, publication and daily feature without rerunning an
 unrecorded fitting decision.
-
-\finding{C33}{S3}{D/V}{State inputs use an all-or-nothing availability rule}
-\loc{wearable/steps/detect.py}{259--267 and 298--302}
-If either sleep or steps file is absent, \code{_flags} returns None and discards the
-other source too. Available sleep flags therefore do not support nightly sleep
-windows when activity flags are absent; available activity is likewise ignored if
-sleep is missing. No per-patient reason is emitted. An empty or poorly covered file
-is a different case: state classification can become UNKNOWN, but the presence
-of one sleep anywhere switches drift away from its fallback globally (C05).
-\repair Load sources independently and define partially observed states explicitly.
-Sleep-only information can identify sleep without asserting wake/rest/activity.
-Record state coverage and fallback reasons separately from file existence.
-\checklater All four sleep/steps file-presence combinations plus empty and sparse
-files; usable information must be retained without inventing the absent state.
 
 \section{Cross-cutting decisions before choosing targeted fixes or a rewrite}
 
